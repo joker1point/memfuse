@@ -1,0 +1,9 @@
+# Line-ending strategy (do not rely on each machine's core.autocrlf)
+* text=auto
+
+# PowerShell scripts: LF in the repo, CRLF in the working tree (target platform: Windows)
+*.ps1 text eol=crlf
+
+# Docs: LF everywhere
+*.md text eol=lf
+*.txt text eol=lf
