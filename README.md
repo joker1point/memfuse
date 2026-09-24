@@ -223,6 +223,29 @@ logs\memory-guard-YYYYMMDD.log   运行日志
 
 ---
 
+### 在一台新机器上第一次运行
+
+依赖层面是零依赖：只需要 Windows 10/11 自带的 PowerShell 5.1，**不需要 Python / .NET SDK / 管理员权限**，干净目录里放一个 `.ps1` 就能跑（运行期只多一个 `logs\` 目录，白名单文件可以不存在）。
+
+但 Windows 对新下载的脚本有两道闸，先过闸再跑：
+
+| 你会看到的报错 | 原因 | 处理 |
+|---|---|---|
+| `... is not digitally signed. You cannot run this script on the current system.` | 文件带"来自 Internet"标记（Mark-of-the-Web），而策略是 `RemoteSigned` | 用仓库里的 **`memfuse.cmd`** 启动（内部已带 `-ExecutionPolicy Bypass`），或先 `Unblock-File .\memory-guard.ps1` |
+| `... cannot be loaded because running scripts is disabled on this system.` | Windows 客户端出厂默认策略 `Restricted` | 同上：`memfuse.cmd`，或显式 `-ExecutionPolicy Bypass`，或 `Set-ExecutionPolicy -Scope Process Bypass` |
+
+`git clone` 过来的文件不带 Mark-of-the-Web，只需处理策略那一行。**两种闸都不需要改机器全局策略**——`memfuse.cmd` 与文档里的 `-ExecutionPolicy Bypass` 都是按次生效的。
+
+第一步永远先演练（不杀任何东西）：
+
+```bat
+memfuse.cmd -Once -DryRun
+memfuse.cmd -ListWindowed
+memfuse.cmd -InstallTask
+```
+
+`-InstallTask` 不需要管理员；若企业策略禁止注册计划任务，它会打印 `ERROR  task registration failed: ...` 并退出，不会静默失败。
+
 ### 复现验证
 
 `-WindowedAction` 的两种语义有可复现的端到端测试（不是看代码，是做实验）：
