@@ -223,6 +223,16 @@ logs\memory-guard-YYYYMMDD.log   运行日志
 
 ---
 
+### 复现验证
+
+`-WindowedAction` 的两种语义有可复现的端到端测试（不是看代码，是做实验）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\windowed-protection.ps1
+```
+
+它会起一个**主动忽略关闭请求**的窗口进程（tkinter，约 250MB），再用临时白名单把机器上其余进程名全部保护起来——于是守护只剩这一个候选：`Skip` 阶段断言它存活，`Close` 阶段断言它被强杀。测试不需要管理员，不碰仓库里的 `protect-list.txt`，日志落在 `%TEMP%`，桌面告警文件测前备份、测后还原。没有 Python（含 tkinter）时它会干净地输出 `[SKIP]` 退出。
+
 ## 七、安全警告
 
 - **先 `-DryRun` 跑几天**，看清"它想杀的都是谁"，再决定是否开火。
