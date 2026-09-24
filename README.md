@@ -55,8 +55,8 @@
 
 先礼后兵，并留下证据：
 
-1. 有主窗口的进程：先发 `WM_CLOSE`（等价于点窗口关闭按钮），给它 5 秒自己退出；
-2. 超时或没有窗口：`Stop-Process -Force` 强杀；
+1. 有主窗口的进程：先发 `WM_CLOSE`（等价于点窗口关闭按钮），给它 **15 秒**自己退出（紧急档只有 3 秒——没时间等人点保存）；
+2. 超时或没有窗口：`Stop-Process -Force` 强杀；**若 `-WindowedAction Skip`，超时的窗口进程不会被强杀**，改试下一个候选；
 3. 杀完等 3 秒，记录释放量（`before → after`）；
 4. **每轮只杀一个**，冷却 60 秒；每小时最多 6 次。
 
@@ -65,7 +65,7 @@
 ### 4) 谁不能杀
 
 - **硬保护**：45 项系统关键进程（内核/会话、OS 基础设施、安全软件）+ 脚本自身启动链（防止守护把自己的终端一起杀掉）；
-- **软保护**：`protect-list.txt`，每行一个进程名；
+- **软保护**：`protect-list.txt`，每行一个进程名；**运行期按修改时间重读**，`-AddProtect node,code` 或手改文件都即时生效，不用重启守护；
 - **应用进程默认不保护**——这是策略选择，不是遗漏。保护名单不是技术问题，而是"谁有权决定杀掉用户的哪个程序"的问题：默认只硬保护"杀了会立刻蓝屏/注销/破坏系统"的最小集合，其余的取舍交还使用者。
 
 ```mermaid
@@ -80,8 +80,8 @@ flowchart TD
     F -->|否| G[只告警: 无人可杀]
     F -->|是| H[取工作集最大者]
     H --> I{有主窗口?}
-    I -->|是| J[WM_CLOSE 等 5 秒]
-    I -->|否| K[Stop-Process 强杀]
+    I -->|是| J[WM_CLOSE 等 15 秒<br/>紧急档 3 秒]
+    I -->|否| K[Stop-Process 强杀<br/>Skip 模式下窗口进程改为跳过]
     J --> L{已退出?}
     L -->|否| K
     L -->|是| M[记录释放量]
@@ -201,9 +201,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -InstallT
 
 # 3) 卸载
 powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -UninstallTask
+
+# 4) 在乎未保存的工作？先看清谁握着窗口，再点名保护（改完即生效，不用重启）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -ListWindowed
+powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -AddProtect node,code
+powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -ListProtected
 ```
 
-全部参数（默认值见括号）：`-WarnPercent`(12) `-CriticalPercent`(7) `-SustainSamples`(3) `-IntervalSec`(5) `-CooldownSec`(60) `-MinCandidateMB`(300) `-MaxKillsPerHour`(6) `-GracefulSeconds`(5) `-Protect node,code` `-ProtectFile .\protect-list.txt` `-DryRun` `-Once` `-NoSelfProtect`
+全部参数（默认值见括号）：`-WarnPercent`(12) `-CriticalPercent`(7) `-SustainSamples`(3) `-IntervalSec`(5) `-CooldownSec`(60) `-MinCandidateMB`(300) `-MaxKillsPerHour`(6) `-GracefulSeconds`(15) `-WindowedAction`(Close) `-Protect node,code` `-ProtectFile .\protect-list.txt` `-AddProtect` `-ListProtected` `-ListWindowed` `-DryRun` `-Once` `-NoSelfProtect`
 
 文件：
 
@@ -222,7 +227,8 @@ logs\memory-guard-YYYYMMDD.log   运行日志
 
 - **先 `-DryRun` 跑几天**，看清"它想杀的都是谁"，再决定是否开火。
 - 它**真的会杀掉你的程序，未保存的工作会丢**。默认保护名单只保证"不会杀掉让系统蓝屏/注销/破坏安全软件"的最小集合——**你的应用进程不在保护范围内**。
-- 想保住某个进程，写进 `protect-list.txt`；代价是：它也可能正是内存临界时最大的那个占用者。
+- 想保住某个进程，写进 `protect-list.txt`（或 `-AddProtect <name>`）；代价是：它也可能正是内存临界时最大的那个占用者。
+- **在乎未保存的工作？三条路，从轻到重**：① `-ListWindowed` 看清谁握着窗口 → `-AddProtect` 点名保护；② `-WindowedAction Skip`：有窗口的进程一律不强杀（代价是机器可能仍然很紧）；③ 调大 `GracefulSeconds`（默认 15 秒），给"保存 / 放弃"对话框更多时间。紧急档（可用内存 < 3.5%）只有 3 秒——那是最坏情况下的取舍，写在明处。
 - 默认只在你自己的权限范围内生效；以管理员身份运行 = 它也能杀提权进程，请自行评估。
 
 ---
