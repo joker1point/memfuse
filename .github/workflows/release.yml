@@ -1,0 +1,59 @@
+name: Release
+
+# Builds the downloadable zip for a release and attaches it as an asset.
+#
+# Runs automatically when a v* tag is pushed, and can also be triggered by hand
+# for an existing tag: Actions -> Release -> Run workflow -> tag.
+#
+# The zip is produced with "git archive", which honours .gitattributes, so the
+# .ps1 inside carries CRLF and the .cmd stays a valid batch file.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to attach an asset to (e.g. v1.0.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve the tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "ref=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Build the zip
+        id: build
+        run: |
+          TAG="${{ steps.tag.outputs.ref }}"
+          NAME="memfuse-${TAG#v}"
+          git archive --format=zip --prefix="${NAME}/" HEAD -o "${NAME}.zip"
+          ls -l "${NAME}.zip"
+          echo "file=${NAME}.zip" >> "$GITHUB_OUTPUT"
+          echo "the zip contains CRLF .ps1 and a CRLF .cmd (via .gitattributes)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.tag.outputs.ref }}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "memfuse $TAG" --notes "See the assets below."
+          gh release upload "$TAG" "${{ steps.build.outputs.file }}" --clobber
