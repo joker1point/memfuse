@@ -55,8 +55,8 @@
 
 先礼后兵，并留下证据：
 
-1. 有主窗口的进程：先发 `WM_CLOSE`（等价于点窗口关闭按钮），给它 5 秒自己退出；
-2. 超时或没有窗口：`Stop-Process -Force` 强杀；
+1. 有主窗口的进程：先发 `WM_CLOSE`（等价于点窗口关闭按钮），给它 **15 秒**自己退出（紧急档只有 3 秒——没时间等人点保存）；
+2. 超时或没有窗口：`Stop-Process -Force` 强杀；**若 `-WindowedAction Skip`，超时的窗口进程不会被强杀**，改试下一个候选；
 3. 杀完等 3 秒，记录释放量（`before → after`）；
 4. **每轮只杀一个**，冷却 60 秒；每小时最多 6 次。
 
@@ -65,7 +65,7 @@
 ### 4) 谁不能杀
 
 - **硬保护**：45 项系统关键进程（内核/会话、OS 基础设施、安全软件）+ 脚本自身启动链（防止守护把自己的终端一起杀掉）；
-- **软保护**：`protect-list.txt`，每行一个进程名；
+- **软保护**：`protect-list.txt`，每行一个进程名；**运行期按修改时间重读**，`-AddProtect node,code` 或手改文件都即时生效，不用重启守护；
 - **应用进程默认不保护**——这是策略选择，不是遗漏。保护名单不是技术问题，而是"谁有权决定杀掉用户的哪个程序"的问题：默认只硬保护"杀了会立刻蓝屏/注销/破坏系统"的最小集合，其余的取舍交还使用者。
 
 ```mermaid
@@ -80,8 +80,8 @@ flowchart TD
     F -->|否| G[只告警: 无人可杀]
     F -->|是| H[取工作集最大者]
     H --> I{有主窗口?}
-    I -->|是| J[WM_CLOSE 等 5 秒]
-    I -->|否| K[Stop-Process 强杀]
+    I -->|是| J[WM_CLOSE 等 15 秒<br/>紧急档 3 秒]
+    I -->|否| K[Stop-Process 强杀<br/>Skip 模式下窗口进程改为跳过]
     J --> L{已退出?}
     L -->|否| K
     L -->|是| M[记录释放量]
@@ -201,9 +201,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -InstallT
 
 # 3) 卸载
 powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -UninstallTask
+
+# 4) 在乎未保存的工作？先看清谁握着窗口，再点名保护（改完即生效，不用重启）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -ListWindowed
+powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -AddProtect node,code
+powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -ListProtected
 ```
 
-全部参数（默认值见括号）：`-WarnPercent`(12) `-CriticalPercent`(7) `-SustainSamples`(3) `-IntervalSec`(5) `-CooldownSec`(60) `-MinCandidateMB`(300) `-MaxKillsPerHour`(6) `-GracefulSeconds`(5) `-Protect node,code` `-ProtectFile .\protect-list.txt` `-DryRun` `-Once` `-NoSelfProtect`
+全部参数（默认值见括号）：`-WarnPercent`(12) `-CriticalPercent`(7) `-SustainSamples`(3) `-IntervalSec`(5) `-CooldownSec`(60) `-MinCandidateMB`(300) `-MaxKillsPerHour`(6) `-GracefulSeconds`(15) `-WindowedAction`(Close) `-Protect node,code` `-ProtectFile .\protect-list.txt` `-AddProtect` `-ListProtected` `-ListWindowed` `-DryRun` `-Once` `-NoSelfProtect`
 
 文件：
 
@@ -218,11 +223,45 @@ logs\memory-guard-YYYYMMDD.log   运行日志
 
 ---
 
+### 在一台新机器上第一次运行
+
+依赖层面是零依赖：只需要 Windows 10/11 自带的 PowerShell 5.1，**不需要 Python / .NET SDK / 管理员权限**，干净目录里放一个 `.ps1` 就能跑（运行期只多一个 `logs\` 目录，白名单文件可以不存在）。
+
+但 Windows 对新下载的脚本有两道闸，先过闸再跑：
+
+| 你会看到的报错 | 原因 | 处理 |
+|---|---|---|
+| `... is not digitally signed. You cannot run this script on the current system.` | 文件带"来自 Internet"标记（Mark-of-the-Web），而策略是 `RemoteSigned` | 用仓库里的 **`memfuse.cmd`** 启动（内部已带 `-ExecutionPolicy Bypass`），或先 `Unblock-File .\memory-guard.ps1` |
+| `... cannot be loaded because running scripts is disabled on this system.` | Windows 客户端出厂默认策略 `Restricted` | 同上：`memfuse.cmd`，或显式 `-ExecutionPolicy Bypass`，或 `Set-ExecutionPolicy -Scope Process Bypass` |
+
+`git clone` 过来的文件不带 Mark-of-the-Web，只需处理策略那一行。**两种闸都不需要改机器全局策略**——`memfuse.cmd` 与文档里的 `-ExecutionPolicy Bypass` 都是按次生效的。
+
+第一步永远先演练（不杀任何东西）：
+
+```bat
+memfuse.cmd -Once -DryRun
+memfuse.cmd -ListWindowed
+memfuse.cmd -InstallTask
+```
+
+`-InstallTask` 不需要管理员；若企业策略禁止注册计划任务，它会打印 `ERROR  task registration failed: ...` 并退出，不会静默失败。
+
+### 复现验证
+
+`-WindowedAction` 的两种语义有可复现的端到端测试（不是看代码，是做实验）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\windowed-protection.ps1
+```
+
+它会起一个**主动忽略关闭请求**的窗口进程（tkinter，约 250MB），再用临时白名单把机器上其余进程名全部保护起来——于是守护只剩这一个候选：`Skip` 阶段断言它存活，`Close` 阶段断言它被强杀。测试不需要管理员，不碰仓库里的 `protect-list.txt`，日志落在 `%TEMP%`，桌面告警文件测前备份、测后还原。没有 Python（含 tkinter）时它会干净地输出 `[SKIP]` 退出。
+
 ## 七、安全警告
 
 - **先 `-DryRun` 跑几天**，看清"它想杀的都是谁"，再决定是否开火。
 - 它**真的会杀掉你的程序，未保存的工作会丢**。默认保护名单只保证"不会杀掉让系统蓝屏/注销/破坏安全软件"的最小集合——**你的应用进程不在保护范围内**。
-- 想保住某个进程，写进 `protect-list.txt`；代价是：它也可能正是内存临界时最大的那个占用者。
+- 想保住某个进程，写进 `protect-list.txt`（或 `-AddProtect <name>`）；代价是：它也可能正是内存临界时最大的那个占用者。
+- **在乎未保存的工作？三条路，从轻到重**：① `-ListWindowed` 看清谁握着窗口 → `-AddProtect` 点名保护；② `-WindowedAction Skip`：有窗口的进程一律不强杀（代价是机器可能仍然很紧）；③ 调大 `GracefulSeconds`（默认 15 秒），给"保存 / 放弃"对话框更多时间。紧急档（可用内存 < 3.5%）只有 3 秒——那是最坏情况下的取舍，写在明处。
 - 默认只在你自己的权限范围内生效；以管理员身份运行 = 它也能杀提权进程，请自行评估。
 
 ---

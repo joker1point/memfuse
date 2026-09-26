@@ -11,20 +11,32 @@
       CRITICAL avail% < CriticalPercent for N samples    -> kill the biggest
                (avail% < CriticalPercent / 2             -> act immediately)
 
-    On CRITICAL the script picks the process with the largest working set,
-    tries a graceful close (WM_CLOSE) when it owns a window, then force-kills
-    it, waits 3s and reports how much memory was released. It then keeps
-    watching - if memory is still critical after the cooldown, it acts again.
+    On CRITICAL the script picks the process with the largest working set.
+    A process that owns a visible window gets a graceful close (WM_CLOSE)
+    first and a longer grace period (GracefulSeconds; the emergency tier caps
+    it at 3s) so unsaved work can still be saved. -WindowedAction Skip goes
+    one step further and never force-kills a windowed process at all.
+    Background processes are force-killed directly. After the kill the script
+    waits 3s, reports how much memory was released, then keeps watching - if
+    memory is still critical after the cooldown, it acts again.
 
     Safety rails:
       * System critical processes are protected (killing them would bugcheck
         the machine or log the user off). Application processes are NOT
-        protected - the largest one always wins.
+        protected by default - the largest one always wins.
+      * Windowed (user-facing) processes may hold unsaved work:
+        -WindowedAction Close (default) = WM_CLOSE, wait, then force kill.
+        -WindowedAction Skip = WM_CLOSE, wait, and if it is still alive leave
+        it alone and try the next candidate (never force-kills a window).
+        -WindowedAction Force = ignore windows, kill immediately.
       * Only this script's own process chain is additionally kept alive (so
         the guard cannot kill its own launcher and die with it) - disable
         with -NoSelfProtect.
       * Extra protected names can be added any time via -Protect /
-        protect-list.txt.
+        protect-list.txt. protect-list.txt is re-read while the guard runs,
+        so whitelisting a process does not need a restart.
+      * -ListWindowed shows who currently owns a window (i.e. who may hold
+        unsaved work); -AddProtect/node,code writes the whitelist for you.
       * Processes that cannot be terminated (system / elevated) simply fail
         and the next candidate is tried.
       * Processes smaller than MinCandidateMB are ignored - killing them would
@@ -59,7 +71,33 @@
 
 .PARAMETER GracefulSeconds
     How long to wait for a windowed process to close itself (WM_CLOSE) before
-    force killing. Default 5. Background processes are force-killed directly.
+    force killing. Default 15 - long enough to notice a "save changes?" dialog
+    and click it. The emergency tier caps the wait at 3 seconds. Background
+    processes are force-killed directly and never wait.
+
+.PARAMETER WindowedAction
+    What to do with a process that owns a visible window (it may hold unsaved
+    work). One of:
+      Close (default) - WM_CLOSE, wait GracefulSeconds, then force kill.
+      Skip            - WM_CLOSE, wait, and if it is still alive LEAVE IT
+                        ALONE and try the next candidate. A windowed process
+                        is never force-killed; the machine may stay tight.
+      Force           - ignore windows completely and kill immediately.
+                        "Keep the machine alive at any cost".
+
+.PARAMETER AddProtect
+    Add process names to protect-list.txt and exit. Idempotent, de-duplicated,
+    keeps existing comments, writes protect-list.txt.bak first. Example:
+    -AddProtect node,code,'Tabbit Browser'
+
+.PARAMETER ListProtected
+    Print the effective protection list (built-in system processes + -Protect
+    arguments + protect-list.txt) and exit.
+
+.PARAMETER ListWindowed
+    List the processes that currently own a visible window - the ones that may
+    hold unsaved work - and exit. Use it to build your whitelist before
+    letting the guard act.
 
 .PARAMETER MaxAttemptsPerRound
     If the top candidate cannot be killed (access denied etc.), try the next
@@ -113,6 +151,16 @@
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -InstallTask
 
+.EXAMPLE
+    # who may lose unsaved work? list windowed processes, then whitelist them
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -ListWindowed
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -AddProtect node,code
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -ListProtected
+
+.EXAMPLE
+    # machine first, unsaved work last: never force-kill anything with a window
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -WindowedAction Skip
+
 .NOTES
     Only processes owned by the current user can be killed without elevation.
     To also kill elevated processes, run the script (or the scheduled task) as
@@ -127,7 +175,8 @@ param(
     [ValidateRange(0, 86400)][int]$CooldownSec = 60,
     [ValidateRange(1, 1048576)][int]$MinCandidateMB = 300,
     [ValidateRange(1, 1000)][int]$MaxKillsPerHour = 6,
-    [ValidateRange(0, 300)][int]$GracefulSeconds = 5,
+    [ValidateRange(0, 300)][int]$GracefulSeconds = 15,
+    [ValidateSet('Close', 'Skip', 'Force')][string]$WindowedAction = 'Close',
     [ValidateRange(1, 20)][int]$MaxAttemptsPerRound = 5,
     [string[]]$Protect = @(),
     [string]$ProtectFile,
@@ -136,6 +185,9 @@ param(
     [switch]$NoSelfProtect,
     [switch]$DryRun,
     [switch]$Once,
+    [string[]]$AddProtect = @(),
+    [switch]$ListProtected,
+    [switch]$ListWindowed,
     [switch]$InstallTask,
     [switch]$UninstallTask
 )
@@ -260,12 +312,119 @@ $protectSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringCo
 foreach ($name in $SystemProtected) { [void]$protectSet.Add((ConvertTo-ProcKey $name)) }
 foreach ($name in $Protect) { [void]$protectSet.Add((ConvertTo-ProcKey $name)) }
 
-$userProtectedCount = 0
-if (Test-Path -LiteralPath $ProtectFile) {
+# The whitelist file is kept in its own set and re-read while the guard runs
+# (LastWriteTime check, one stat per sampling interval), so whitelisting a
+# process - by hand or with -AddProtect - takes effect without a restart.
+$script:fileProtect = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+$script:protectFileStamp = [datetime]::MinValue
+
+function Update-ProtectFileSet {
+    $exists = Test-Path -LiteralPath $ProtectFile
+    $stamp = if ($exists) { (Get-Item -LiteralPath $ProtectFile).LastWriteTimeUtc } else { [datetime]::MinValue }
+    if ($stamp -eq $script:protectFileStamp) { return }
+    $script:protectFileStamp = $stamp
+    $script:fileProtect.Clear()
+    if (-not $exists) { return }
     foreach ($raw in (Get-Content -LiteralPath $ProtectFile -Encoding UTF8)) {
         $entry = ($raw -split '#')[0].Trim()
-        if ($entry -and $protectSet.Add((ConvertTo-ProcKey $entry))) { $userProtectedCount++ }
+        if ($entry) { [void]$script:fileProtect.Add((ConvertTo-ProcKey $entry)) }
     }
+}
+
+function Test-Protected {
+    param([string]$Name)
+    $key = ConvertTo-ProcKey $Name
+    return ($protectSet.Contains($key) -or $script:fileProtect.Contains($key))
+}
+
+# load the whitelist now; the sampling loop refreshes it on every tick
+Update-ProtectFileSet
+
+# ---------------------------------------------------------------------------
+# whitelist / inspection commands (run once and exit)
+# ---------------------------------------------------------------------------
+function Show-ProtectList {
+    Write-Host '============ protected processes (never killed) ============'
+    Write-Host ('built-in system critical: {0}' -f $SystemProtected.Count)
+    foreach ($chunk in ($SystemProtected | Sort-Object)) { Write-Host ('    ' + $chunk) }
+    if ($Protect.Count -gt 0) { Write-Host ('from -Protect: {0}' -f ($Protect -join ', ')) }
+    Write-Host ('from protect-list.txt: {0}  ({1})' -f $script:fileProtect.Count, $ProtectFile)
+    if ($script:fileProtect.Count -gt 0) {
+        foreach ($name in ($script:fileProtect | Sort-Object)) { Write-Host ('    ' + $name) }
+    }
+    Write-Host '============================================================='
+}
+
+function Add-ProtectEntries {
+    param([string[]]$Names)
+
+    $existing = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    if (Test-Path -LiteralPath $ProtectFile) {
+        $lines = @(Get-Content -LiteralPath $ProtectFile -Encoding UTF8)
+        foreach ($raw in $lines) {
+            $entry = ($raw -split '#')[0].Trim()
+            if ($entry) { [void]$existing.Add((ConvertTo-ProcKey $entry)) }
+        }
+        Copy-Item -LiteralPath $ProtectFile -Destination ($ProtectFile + '.bak') -Force
+    } else {
+        $lines = @('# memfuse / memory-guard protect list - one process name per line, # starts a comment', '')
+    }
+
+    $added = New-Object 'System.Collections.Generic.List[string]'
+    # Accept every way this switch can arrive: -AddProtect node,code from a
+    # PowerShell prompt (array), "-AddProtect node,code" through powershell
+    # -File (a single literal string). Split on , and ; only - never on
+    # whitespace, because real process names contain spaces
+    # ("Tabbit Browser", "CodeBuddy CN", "Memory Compression").
+    $flat = @()
+    foreach ($entry in $Names) {
+        foreach ($part in ($entry -split '[,;]+')) {
+            if ($part.Trim()) { $flat += $part.Trim() }
+        }
+    }
+    foreach ($name in $flat) {
+        $key = ConvertTo-ProcKey $name
+        if (-not $key) { continue }
+        if ($protectSet.Contains($key)) {
+            Write-Host ('  = {0} (already protected by the built-in system list or -Protect)' -f $key)
+            continue
+        }
+        if (-not $existing.Add($key)) {
+            Write-Host ('  = {0} (already in the protect file)' -f $key)
+            continue
+        }
+        $lines += $key
+        $added.Add($key)
+    }
+
+    if ($added.Count -eq 0) { Write-Host 'nothing added.'; return }
+
+    # UTF-8 without BOM: a BOM would corrupt the first entry for other readers.
+    [IO.File]::WriteAllText($ProtectFile, (($lines -join "`r`n") + "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host ('added {0} name(s) to {1}:' -f $added.Count, $ProtectFile)
+    foreach ($name in $added) { Write-Host ('  + ' + $name) }
+    Write-Host 'a running guard picks this up within one sampling interval (the file is re-read).'
+}
+
+function Show-WindowedProcesses {
+    $procs = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero })
+    Write-Host '=== processes owning a visible window (they may hold unsaved work) ==='
+    if ($procs.Count -eq 0) { Write-Host 'none found.'; return }
+
+    $rows = foreach ($p in ($procs | Sort-Object WorkingSet64 -Descending)) {
+        [pscustomobject]@{
+            State = $(if (Test-Protected $p.ProcessName) { 'protected' } else { 'killable' })
+            Name  = $p.ProcessName
+            Pid   = $p.Id
+            WS_MB = [int][math]::Round($p.WorkingSet64 / 1MB)
+            Title = $p.MainWindowTitle
+        }
+    }
+    Write-Host (($rows | Format-Table -AutoSize | Out-String -Width 220).TrimEnd())
+    Write-Host ('total {0} windowed process(es). To keep one alive anyway:' -f $procs.Count)
+    Write-Host ('    powershell -NoProfile -ExecutionPolicy Bypass -File "{0}" -AddProtect <name1>,<name2>' -f $PSCommandPath)
+    Write-Host '  or never force-kill windowed processes at all: -WindowedAction Skip'
+    Write-Host '  note: an elevated process can own a window and still be unkillable (access denied).'
 }
 
 # own process chain: keeps the guard from killing its own launcher - and itself
@@ -316,36 +475,45 @@ function Get-Candidates {
         return @()
     }
     $list = @($list | Where-Object {
-        (-not $protectSet.Contains((ConvertTo-ProcKey $_.ProcessName))) -and
+        (-not (Test-Protected $_.ProcessName)) -and
         (-not $script:SelfChain.Contains($_.Id))
     })
     return @($list | Sort-Object WorkingSet64 -Descending | Select-Object -First $TopN)
 }
 
 function Stop-TargetProcess {
-    param([System.Diagnostics.Process]$Proc)
+    param(
+        [System.Diagnostics.Process]$Proc,
+        [switch]$Emergency
+    )
     $target = $Proc
     try { $target.Refresh() } catch { }
-    try { if ($target.HasExited) { return $true } } catch { return $true }
+    try { if ($target.HasExited) { return 'stopped' } } catch { return 'stopped' }
 
-    # graceful close first, but only for windowed processes
-    try {
-        if ($target.MainWindowHandle -ne [IntPtr]::Zero) {
-            $null = $target.CloseMainWindow()
-            $deadline = (Get-Date).AddSeconds([math]::Max($GracefulSeconds, 1))
-            while ((Get-Date) -lt $deadline) {
-                Start-Sleep -Milliseconds 400
-                try { $target.Refresh() } catch { }
-                try { if ($target.HasExited) { return $true } } catch { return $true }
-            }
+    $hasWindow = $false
+    try { $hasWindow = ($target.MainWindowHandle -ne [IntPtr]::Zero) } catch { }
+
+    # graceful close first, windowed processes only. -WindowedAction Force skips
+    # this phase; -WindowedAction Skip never escalates to a force kill.
+    if ($hasWindow -and $WindowedAction -ne 'Force') {
+        $grace = [math]::Max($GracefulSeconds, 1)
+        if ($Emergency) { $grace = [math]::Min($grace, 3) }   # no time for a save dialog
+        try { $null = $target.CloseMainWindow() } catch { }
+        $deadline = (Get-Date).AddSeconds($grace)
+        while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 400
+            try { $target.Refresh() } catch { }
+            try { if ($target.HasExited) { return 'stopped' } } catch { return 'stopped' }
         }
-    } catch { }
+        if ($WindowedAction -eq 'Skip') { return 'skipped' }
+    }
 
     try { Stop-Process -Id $target.Id -Force -ErrorAction Stop } catch {
         Write-Verbose ('Stop-Process failed: {0}' -f $_.Exception.Message)
     }
     Start-Sleep -Milliseconds 800
-    return (-not [bool](Get-Process -Id $target.Id -ErrorAction SilentlyContinue))
+    if (Get-Process -Id $target.Id -ErrorAction SilentlyContinue) { return 'failed' }
+    return 'stopped'
 }
 
 function Invoke-Relief {
@@ -374,8 +542,14 @@ log: {4}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $AvailMB, $AvailPct, $Min
     }) -join ' | '
     Write-Log ('{0} avail {1}MB ({2}%) commit {3}% total {4}MB - candidates: {5}' -f $tag, $AvailMB, $AvailPct, $CommitPct, $TotalMB, $preview)
 
+    $skipped = 0
     foreach ($proc in $cands) {
         $wsMB = [int][math]::Round($proc.WorkingSet64 / 1MB)
+        # Capture the name up front: once the process has exited, .ProcessName
+        # reads back empty and the log line / desktop alert would lose the
+        # culprit's name exactly where it matters most.
+        $procName = $proc.ProcessName
+        if (-not $procName) { $procName = '<unknown>' }
         $path = ''
         $cmd = ''
         try { $path = [string]$proc.Path } catch { }
@@ -384,15 +558,25 @@ log: {4}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $AvailMB, $AvailPct, $Min
         } catch { }
         if ($cmd.Length -gt 300) { $cmd = $cmd.Substring(0, 300) + '...' }
 
+        $windowed = $false
+        try { $windowed = ($proc.MainWindowHandle -ne [IntPtr]::Zero) } catch { }
+
         if ($DryRun) {
-            Write-Log ('DRY-RUN would kill {0} pid={1} ws={2}MB path={3} cmd={4}' -f $proc.ProcessName, $proc.Id, $wsMB, $path, $cmd)
+            $note = if ($windowed) { ' [has a window -> WindowedAction=' + $WindowedAction + ']' } else { '' }
+            Write-Log ('DRY-RUN would kill {0} pid={1} ws={2}MB path={3} cmd={4}{5}' -f $procName, $proc.Id, $wsMB, $path, $cmd, $note)
             return $false
         }
 
-        Write-Log ('ACTION  killing {0} pid={1} ws={2}MB path={3} cmd={4}' -f $proc.ProcessName, $proc.Id, $wsMB, $path, $cmd)
+        Write-Log ('ACTION  killing {0} pid={1} ws={2}MB path={3} cmd={4}' -f $procName, $proc.Id, $wsMB, $path, $cmd)
 
-        if (-not (Stop-TargetProcess -Proc $proc)) {
-            Write-Log ('ACTION  failed to stop {0} pid={1} (access denied or still busy) - trying next candidate' -f $proc.ProcessName, $proc.Id)
+        $verdict = Stop-TargetProcess -Proc $proc -Emergency:$Emergency
+        if ($verdict -eq 'skipped') {
+            $skipped++
+            Write-Log ('SKIP    {0} pid={1} ws={2}MB owns a window and did not close itself - left alone (WindowedAction=Skip keeps unsaved work); trying next candidate' -f $procName, $proc.Id, $wsMB)
+            continue
+        }
+        if ($verdict -eq 'failed') {
+            Write-Log ('ACTION  failed to stop {0} pid={1} (access denied or still busy) - trying next candidate' -f $procName, $proc.Id)
             continue
         }
 
@@ -400,7 +584,7 @@ log: {4}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $AvailMB, $AvailPct, $Min
         try {
             $after = Get-MemorySample
             Write-Log ('ACTION  stopped {0} pid={1} - avail {2}MB ({3}%) -> {4}MB ({5}%) [delta {6}MB]' -f `
-                $proc.ProcessName, $proc.Id, $AvailMB, $AvailPct, $after.AvailMB, $after.AvailPct, ($after.AvailMB - $AvailMB))
+                $procName, $proc.Id, $AvailMB, $AvailPct, $after.AvailMB, $after.AvailPct, ($after.AvailMB - $AvailMB))
             Write-DesktopAlert ('Memory Guard {0}
 before: {1} MB free ({2}%)
 after : {3} MB free ({4}%)
@@ -411,13 +595,22 @@ log: {10}
 
 If this was something you need, add its name to:
 {11}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $AvailMB, $AvailPct, $after.AvailMB, $after.AvailPct, `
-                $proc.ProcessName, $proc.Id, $wsMB, $path, $cmd, $LogFile, $ProtectFile)
+                $procName, $proc.Id, $wsMB, $path, $cmd, $LogFile, $ProtectFile)
         } catch { }
 
         return $true
     }
 
-    Write-Log ('ACTION  all {0} candidate(s) failed - run the guard with more privileges if it must kill elevated processes' -f $cands.Count)
+    if ($skipped -gt 0) {
+        Write-Log ('ACTION  nothing done: {0} candidate(s) left alone (windowed, WindowedAction=Skip), the rest failed - machine stays tight by design' -f $skipped)
+        Write-DesktopAlert ('Memory Guard {0}
+available: still critical after evaluating every candidate.
+reason: {1} windowed process(es) were left alone (WindowedAction=Skip).
+If you want the guard to force-kill them: rerun with -WindowedAction Close,
+or close / whitelist the app that is eating the memory.' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $skipped)
+    } else {
+        Write-Log ('ACTION  all {0} candidate(s) failed - run the guard with more privileges if it must kill elevated processes' -f $cands.Count)
+    }
     return $false
 }
 
@@ -430,7 +623,8 @@ function Show-Config {
     Write-Host ('thresholds    : warn < {0}%  critical < {1}%  sustain {2} x {3}s (emergency < {4}%)' -f `
         $WarnPercent, $CriticalPercent, $SustainSamples, $IntervalSec, [math]::Round($CriticalPercent / 2.0, 1))
     Write-Host ('limits        : cooldown {0}s, max {1} kill(s)/hour, min candidate {2} MB' -f $CooldownSec, $MaxKillsPerHour, $MinCandidateMB)
-    Write-Host ('protected     : {0} names ({1} system critical + {2} from protect file)' -f $protectSet.Count, $SystemProtected.Count, $userProtectedCount)
+    Write-Host ('protected     : {0} names ({1} built-in system + {2} user: -Protect / protect-list.txt)' -f ($protectSet.Count + $script:fileProtect.Count), $SystemProtected.Count, (($protectSet.Count - $SystemProtected.Count) + $script:fileProtect.Count))
+    Write-Host ('windowed      : {0} (grace {1}s, emergency {2}s)' -f $WindowedAction, [math]::Max($GracefulSeconds, 1), [math]::Min([math]::Max($GracefulSeconds, 1), 3))
     if ($script:SelfChain.Count -gt 0) {
         Write-Host ('self chain    : pid {0} (the guard and its own launcher chain)' -f (($script:SelfChain | Sort-Object) -join ', '))
     } else {
@@ -448,6 +642,8 @@ function Install-GuardTask {
     $argLine = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $PSCommandPath
     if ($DryRun) { $argLine += ' -DryRun' }
     if ($NoSelfProtect) { $argLine += ' -NoSelfProtect' }
+    if ($WindowedAction -ne 'Close') { $argLine += (' -WindowedAction {0}' -f $WindowedAction) }
+    if ($GracefulSeconds -ne 15) { $argLine += (' -GracefulSeconds {0}' -f $GracefulSeconds) }
 
     $action = New-ScheduledTaskAction -Execute $psExe -Argument $argLine -WorkingDirectory $PSScriptRoot
 
@@ -510,6 +706,9 @@ function Uninstall-GuardTask {
 # main
 # ---------------------------------------------------------------------------
 if ($UninstallTask) { Uninstall-GuardTask; exit 0 }
+if ($ListProtected) { Show-ProtectList; exit 0 }
+if ($ListWindowed) { Show-WindowedProcesses; exit 0 }
+if (@($AddProtect).Count -gt 0) { Add-ProtectEntries -Names $AddProtect; exit 0 }
 if ($InstallTask) { Install-GuardTask; exit 0 }
 if ($WarnPercent -le $CriticalPercent) { throw 'WarnPercent must be greater than CriticalPercent' }
 
@@ -537,6 +736,7 @@ $lastKill = [datetime]::MinValue
 $killTimes = New-Object 'System.Collections.Generic.List[datetime]'
 
 while ($true) {
+    Update-ProtectFileSet
     try {
         $sample = Get-MemorySample
     } catch {
