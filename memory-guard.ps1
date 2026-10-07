@@ -376,6 +376,24 @@ Update-ProtectFileSet
 # ---------------------------------------------------------------------------
 # whitelist / inspection commands (run once and exit)
 # ---------------------------------------------------------------------------
+function Get-TitleWidth {
+    param([int]$Reserved = 46)
+    # Window titles are unbounded, so a row could wrap on a 120-column console
+    # and the list became unreadable (seen in real use). Truncate instead of
+    # wrapping - the process name is what identifies a row anyway.
+    $width = 120
+    try { $w = $Host.UI.RawUI.WindowSize.Width; if ($w -ge 70) { $width = $w } } catch { }
+    return [int][math]::Max(18, $width - $Reserved)
+}
+
+function Shorten-Text {
+    param([string]$Text, [int]$Max)
+    if (-not $Text) { return '' }
+    if ($Text.Length -le $Max) { return $Text }
+    if ($Max -le 1) { return '…' }
+    return $Text.Substring(0, $Max - 1) + '…'
+}
+
 function Show-ProtectList {
     Write-Host '============ 受保护进程（永不被终止）============'
     Write-Host ('系统内置（杀了会导致蓝屏/注销，共 {0} 项）：' -f $SystemProtected.Count)
@@ -514,9 +532,11 @@ function Show-WindowedProcesses {
     Write-Host '=== 拥有可见窗口的进程（它们可能握着没保存的内容）==='
     $rows = @(Get-WindowedRows)
     if ($rows.Count -eq 0) { Write-Host '没找到。'; return }
+    $titleWidth = Get-TitleWidth -Reserved 48
     foreach ($r in $rows) {
         $state = if ($r.Protected) { '已保护' } else { '可被杀' }
-        Write-Host ('  {0}  {1,-24} {2,-22} {3,6} MB' -f $state, $r.Name, $r.Title, $r.WS_MB)
+        $titleText = (Shorten-Text $r.Title $titleWidth).PadRight($titleWidth)
+        Write-Host ('  {0}  {1,-24} {2} {3,6} MB' -f $state, $r.Name, $titleText, $r.WS_MB)
     }
     Write-Host ('共 {0} 个。要保护其中某个：双击 whitelist.cmd（看列表、输编号），或 -AddProtect <进程名>' -f $rows.Count)
     Write-Host '  想更省事：-Preset safe —— 有窗口的程序一律不杀，基本不用维护名单。'
@@ -642,11 +662,13 @@ function Invoke-PickWhitelist {
     if ($recent) { Write-Host ('上次被守护终止的是：{0}（如果这是你在用的，建议保护它）' -f $recent) }
     Write-Host ''
     if ($rows.Count -eq 0) { Write-Host '当前没有带窗口的程序，没什么可选的。'; return }
+    $titleWidth = Get-TitleWidth -Reserved 52
     for ($i = 0; $i -lt $rows.Count; $i++) {
         $r = $rows[$i]
         $state = if ($r.Protected) { '[已保护]' } else { '[      ]' }
         $flag = if ($recent -and ((ConvertTo-ProcKey $r.Name) -eq (ConvertTo-ProcKey $recent))) { '   <= 上次被杀的' } else { '' }
-        Write-Host ('  {0} {1,2}. {2,-24} {3,-20} {4,6} MB{5}' -f $state, ($i + 1), $r.Name, $r.Title, $r.WS_MB, $flag)
+        $titleText = (Shorten-Text $r.Title $titleWidth).PadRight($titleWidth)
+        Write-Host ('  {0} {1,2}. {2,-24} {3} {4,6} MB{5}' -f $state, ($i + 1), $r.Name, $titleText, $r.WS_MB, $flag)
     }
     Write-Host ''
     Write-Host '输入编号（空格分隔，回车结束；直接回车 = 取消；对已保护的项输入编号 = 取消保护）'
