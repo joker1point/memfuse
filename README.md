@@ -188,6 +188,18 @@ incorrectly formatted or out of range.
 
 ## 六、快速开始
 
+### 不想敲命令？（三步，全程只按数字）
+
+1. **下载**：本页绿色按钮 `Code` → `Download ZIP`（或 Releases 页的 zip），解压到任意文件夹（放桌面就行，不需要安装任何东西）；
+2. **双击 `memfuse.cmd`** → 出现数字菜单，按 `1` 先演练：什么都不杀，只告诉你"如果真动手，它会挑谁"；
+3. 按 `2` 保护你在乎的程序（列表里输编号：微信、编辑器、CodeBuddy…… 选谁保护谁），再按 `3` 装上守护，然后关掉窗口 —— 完成。
+
+菜单里还有 `4` 查看保护名单、`5` 卸载、`0` 退出。**白名单随时改**：再双击一次 `memfuse.cmd` 选 `2`，或直接双击 `whitelist.cmd`。
+
+> 两个细节：`memfuse.cmd` 自带 `-ExecutionPolicy Bypass` 启动脚本，所以"新下载的脚本被 Windows 拦住"不会发生；安装守护也不需要管理员权限。
+
+### 想敲命令？（等价写法）
+
 ```powershell
 # 0) 先演练：什么都不杀，只告诉你会杀谁（强烈建议先跑几天）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Once -DryRun
@@ -222,7 +234,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Preset s
 
 全部参数（默认值见括号）：`-WarnPercent`(12) `-CriticalPercent`(7) `-SustainSamples`(3) `-IntervalSec`(5) `-CooldownSec`(60) `-MinCandidateMB`(300) `-MaxKillsPerHour`(6) `-GracefulSeconds`(15) `-WindowedAction`(Close) `-Preset`(safe/balanced/aggressive) `-Protect node,code` `-ProtectFile .\protect-list.txt` `-AddProtect` `-RemoveProtect` `-Pick`
 
-【查看类】`-ListProtected`（现有名单，含"当前未运行"标注）`-ListWindowed`（谁有窗口）`-Help`（中文用法）`-DryRun` `-Once` `-NoSelfProtect`
+【查看类】`-ListProtected`（现有名单，含"当前未运行"标注）`-ListWindowed`（谁有窗口）`-Help`（中文用法）`-Menu`（数字菜单，等同双击 `memfuse.cmd`）`-DryRun` `-Once` `-NoSelfProtect`
 
 【白名单的三种改法】① 双击 `whitelist.cmd`（推荐，选编号）；② `-Pick`（同上的命令行版）；③ 直接编辑 `protect-list.txt`（每行一个进程名）。**三种都立即生效，不用重启守护**；写错名字会有明确提示，不会静默失效。
 

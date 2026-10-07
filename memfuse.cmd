@@ -19,12 +19,14 @@ endlocal
 exit /b %ERRORLEVEL%
 
 :usage
-rem No arguments: nothing is started. The usage screen is printed by the
-rem PowerShell side (Chinese renders correctly there; .cmd text stays ASCII).
+rem No arguments: open the numbered menu. Nothing is started by itself, and
+rem the menu text comes from the PowerShell side (Chinese renders correctly
+rem there; .cmd text stays ASCII). In a shell without a console -Menu prints
+rem the usage text instead of waiting for input, so it can never hang.
 set "INTERACTIVE="
 echo %CMDCMDLINE% | find /i "%~nx0" >nul && set "INTERACTIVE=1"
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0memory-guard.ps1" -Help
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0memory-guard.ps1" -Menu
 if defined INTERACTIVE (echo. & echo Press any key to close this window... & pause >nul)
 endlocal
 exit /b 0

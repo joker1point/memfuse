@@ -85,6 +85,19 @@
       Force           - ignore windows completely and kill immediately.
                         "Keep the machine alive at any cost".
 
+.PARAMETER Menu
+    Show the numbered menu and exit. This is what double-clicking memfuse.cmd
+    does, so a first-time user can do the whole setup (dry run -> whitelist ->
+    install) by pressing numbers instead of typing commands:
+      1 dry run   2 whitelist picker   3 install   4 show list   5 uninstall
+      0 quit
+    In a non-interactive shell (no console attached) it prints the usage text
+    instead of waiting for input, so nothing can hang.
+
+.PARAMETER MenuInput
+    Scripted answers for -Menu, e.g. "2,1,0" (menu choice 2, picker answer 1,
+    then quit). Exists so the test suite can drive the menu without a console.
+
 .PARAMETER AddProtect
     Add process names to protect-list.txt and exit. Idempotent, de-duplicated,
     keeps existing comments, writes protect-list.txt.bak first. Example:
@@ -191,6 +204,8 @@ param(
     [switch]$ListWindowed,
     [switch]$Pick,
     [string]$PickInput,
+    [switch]$Menu,
+    [string]$MenuInput,
     [ValidateSet('safe', 'balanced', 'aggressive')][string]$Preset,
     [switch]$Help,
     [switch]$InstallTask,
@@ -511,7 +526,9 @@ function Show-Usage {
     Write-Host ''
     Write-Host 'memfuse —— 内存临界前的最后防线（在系统卡死之前，终止占用最大的那个进程）'
     Write-Host ''
-    Write-Host '第一次用，建议按这个顺序：'
+    Write-Host '第一次用，最省事的走法：双击 memfuse.cmd，出现数字菜单，按 1 → 2 → 3。'
+    Write-Host ''
+    Write-Host '想敲命令的话，按这个顺序：'
     Write-Host '  1) 先演练（什么都不杀，只看它想杀谁）'
     Write-Host '        memfuse.cmd -Once -DryRun'
     Write-Host '  2) 把你在乎的程序保护起来（双击 whitelist.cmd 最省事）'
@@ -528,6 +545,87 @@ function Show-Usage {
     Write-Host ''
     Write-Host '其他常用：-ListWindowed 谁有窗口 | -ListProtected 现有名单 | -UninstallTask 卸载'
     Write-Host ''
+}
+
+# ---------------------------------------------------------------------------
+# the double-click menu: the whole first-time setup behind single digits
+# ---------------------------------------------------------------------------
+function Show-Menu {
+    param([string]$Scripted)
+
+    # -MenuInput "2,1,0" = menu choice 2, let the picker answer 1, then quit.
+    # Without a console the menu prints the usage text instead of waiting for
+    # input, so nothing can ever hang in an automated context.
+    $queue = New-Object 'System.Collections.Generic.Queue[string]'
+    if ($Scripted) {
+        foreach ($part in ($Scripted -split '[,;\s]+')) { if ($part.Trim()) { $queue.Enqueue($part.Trim()) } }
+    }
+
+    while ($true) {
+        Update-ProtectFileSet
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        $state = if ($task) { '已安装（{0}）' -f $task.State } else { '未安装' }
+
+        Write-Host ''
+        Write-Host '================ memfuse（内存保险丝）================'
+        Write-Host ('  当前：守护 {0} ｜ 白名单 {1} 项' -f $state, $script:fileProtect.Count)
+        Write-Host '  现在什么都没启动 —— 下面的动作都是你自己按出来的。'
+        Write-Host ''
+        Write-Host '   1  先演练一次（什么都不杀，只看它想杀谁）'
+        Write-Host '   2  保护我在乎的程序（打开选择界面，输编号）'
+        Write-Host '   3  装上守护（登录自动生效 + 每 5 分钟自愈，不需要管理员）'
+        Write-Host '   4  查看保护名单'
+        Write-Host '   5  卸载守护'
+        Write-Host '   0  退出'
+        Write-Host ''
+
+        $answer = ''
+        if ($queue.Count -gt 0) {
+            $answer = $queue.Dequeue()
+            Write-Host ('请输入数字（0-5），回车确认： {0}' -f $answer)
+        } elseif ([Console]::IsInputRedirected) {
+            Show-Usage
+            return
+        } else {
+            $answer = [string](Read-Host '请输入数字（0-5），回车确认')
+        }
+
+        switch ($answer.Trim()) {
+            '0' { Write-Host ''; Write-Host '已退出。什么都没启动 —— 双击 memfuse.cmd 可以随时回到这里。'; return }
+            '1' {
+                Write-Host ''
+                Write-Host '>>> 演练：只看不动手，什么都不杀'
+                & powershell -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath -Once -DryRun
+                Write-Host '>>> 演练结束：上面那句 "would kill ..." 就是"如果它真动手，会挑谁"。'
+                Write-Host '    （如果只看到一行 started，说明此刻内存正常、它无事可做 —— 这是好事。）'
+            }
+            '2' {
+                Write-Host ''
+                Write-Host '>>> 白名单：列表里选谁就保护谁（对同一个编号再选一次 = 取消保护）'
+                if ($queue.Count -gt 0) { Invoke-PickWhitelist -Answer $queue.Dequeue() }
+                elseif ([Console]::IsInputRedirected) { Write-Host '（当前没有可交互的控制台，已跳过）' }
+                else { Invoke-PickWhitelist }
+            }
+            '3' {
+                Write-Host ''
+                Write-Host '>>> 安装守护'
+                Install-GuardTask
+                Write-Host '>>> 装好了。现在可以关掉这个窗口 —— 之后它自己会跑，白名单随时改。'
+            }
+            '4' { Write-Host ''; Show-ProtectList }
+            '5' {
+                $yes = ''
+                if ($queue.Count -gt 0) { $yes = $queue.Dequeue() }
+                elseif ([Console]::IsInputRedirected) { Write-Host '（当前没有可交互的控制台，已跳过卸载）'; continue }
+                else { $yes = [string](Read-Host '确定卸载吗？输入 y 回车（其它内容 = 取消）') }
+                if (@('y', 'yes', '是') -contains $yes.Trim().ToLower()) { Write-Host ''; Uninstall-GuardTask }
+                else { Write-Host '已取消，什么都没变。' }
+            }
+            default { Write-Host ('没看懂「{0}」—— 请输入 0 到 5 之间的数字。' -f $answer) }
+        }
+
+        if ($queue.Count -eq 0 -and -not [Console]::IsInputRedirected) { $null = Read-Host '（按回车回到菜单）' }
+    }
 }
 
 function Invoke-PickWhitelist {
@@ -854,6 +952,7 @@ function Uninstall-GuardTask {
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
+if ($Menu) { Show-Menu -Scripted $MenuInput; exit 0 }
 if ($UninstallTask) { Uninstall-GuardTask; exit 0 }
 if ($Help) { Show-Usage; exit 0 }
 if ($ListProtected) { Show-ProtectList; exit 0 }
