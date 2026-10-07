@@ -428,7 +428,13 @@ function Set-ProtectEntries {
     foreach ($name in (ConvertTo-NameList -Names $Remove)) {
         $key = ConvertTo-ProcKey $name
         if (-not $key) { continue }
-        if (-not $existing.Remove($key)) { if (-not $Quiet) { Write-Host ('  = {0}：不在名单里' -f $key) }; continue }
+        if (-not $existing.Remove($key)) {
+            if (-not $Quiet) {
+                if ($protectSet.Contains($key)) { Write-Host ('  = {0}：系统内置保护，不能取消（它被杀会连累系统）' -f $key) }
+                else { Write-Host ('  = {0}：不在名单里' -f $key) }
+            }
+            continue
+        }
         $kept = New-Object 'System.Collections.Generic.List[string]'
         foreach ($line in $lines) {
             $entry = ($line -split '#')[0].Trim()
@@ -527,9 +533,13 @@ function Show-Usage {
 function Invoke-PickWhitelist {
     param([string]$Answer)
 
-    $rows = @(Get-WindowedRows)
+    # Only show what the user can actually change: processes protected by the
+    # built-in system list (explorer, svchost, ...) must never be listed here -
+    # picking one can only produce a confusing "cannot change that" answer.
+    $rows = @(Get-WindowedRows | Where-Object { -not $protectSet.Contains((ConvertTo-ProcKey $_.Name)) })
     Write-Host ''
     Write-Host '=== memfuse 白名单：选择要保护的程序（被保护的永不被终止）==='
+    Write-Host '（系统内置保护的进程不在此列——它们本来就杀不得）'
     $recent = Get-RecentKillName
     if ($recent) { Write-Host ('上次被守护终止的是：{0}（如果这是你在用的，建议保护它）' -f $recent) }
     Write-Host ''
