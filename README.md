@@ -211,6 +211,18 @@ incorrectly formatted or out of range.
 
 ## 六、快速开始
 
+### 不想敲命令？（三步，全程只按数字）
+
+1. **下载**：本页绿色按钮 `Code` → `Download ZIP`（或 Releases 页的 zip），解压到任意文件夹（放桌面就行，不需要安装任何东西）；
+2. **双击 `memfuse.cmd`** → 出现数字菜单，按 `1` 先演练：什么都不杀，只告诉你"如果真动手，它会挑谁"；
+3. 按 `2` 保护你在乎的程序（列表里输编号：微信、编辑器、CodeBuddy…… 选谁保护谁），再按 `3` 装上守护，然后关掉窗口 —— 完成。
+
+菜单里还有 `4` 查看保护名单、`5` 卸载、`0` 退出。**白名单随时改**：再双击一次 `memfuse.cmd` 选 `2`，或直接双击 `whitelist.cmd`。
+
+> 两个细节：`memfuse.cmd` 自带 `-ExecutionPolicy Bypass` 启动脚本，所以"新下载的脚本被 Windows 拦住"不会发生；安装守护也不需要管理员权限。
+
+### 想敲命令？（等价写法）
+
 ```powershell
 # 0) 先演练：什么都不杀，只告诉你会杀谁（强烈建议先跑几天）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Once -DryRun
@@ -225,13 +237,29 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -InstallT
 # 3) 卸载
 powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -UninstallTask
 
-# 4) 在乎未保存的工作？先看清谁握着窗口，再点名保护（改完即生效，不用重启）
-powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -ListWindowed
-powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -AddProtect node,code
-powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -ListProtected
+# 4) 白名单：最省事的做法是「双击 whitelist.cmd」——看列表、输入编号即可
+#    命令行等价写法：
+powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Pick
+powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -AddProtect 微信,Code
+powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -RemoveProtect 微信
+
+# 5) 不想维护名单？用三档预设选一个策略（见下）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Preset safe -InstallTask
 ```
 
-全部参数（默认值见括号）：`-WarnPercent`(12) `-CriticalPercent`(7) `-SustainSamples`(3) `-IntervalSec`(5) `-CooldownSec`(60) `-MinCandidateMB`(300) `-MaxKillsPerHour`(6) `-GracefulSeconds`(15) `-WindowedAction`(Close) `-Protect node,code` `-ProtectFile .\protect-list.txt` `-AddProtect` `-ListProtected` `-ListWindowed` `-DryRun` `-Once` `-PreferIdle` `-NoSelfProtect`
+### 三档预设（记不住参数就记这三个词）
+
+| 预设 | 含义 | 适合谁 |
+|---|---|---|
+| `-Preset safe` | **有窗口的程序一律不杀**（`Skip` + 宽限期 30 秒） | 数据优先：宁可机器紧一会儿，也不要丢未保存的工作 |
+| `-Preset balanced` | 先请它自己关（`WM_CLOSE`），等不到再强杀（默认） | 大多数人的默认选择 |
+| `-Preset aggressive` | 直接强杀（`Force`） | 机器优先：卡死比丢数据更难受 |
+
+全部参数（默认值见括号）：`-WarnPercent`(12) `-CriticalPercent`(7) `-SustainSamples`(3) `-IntervalSec`(5) `-CooldownSec`(60) `-MinCandidateMB`(300) `-MaxKillsPerHour`(6) `-GracefulSeconds`(15) `-WindowedAction`(Close) `-Preset`(safe/balanced/aggressive) `-Protect node,code` `-ProtectFile .\protect-list.txt` `-AddProtect` `-RemoveProtect` `-Pick`
+
+【查看类】`-ListProtected`（现有名单，含"当前未运行"标注）`-ListWindowed`（谁有窗口）`-Help`（中文用法）`-Menu`（数字菜单，等同双击 `memfuse.cmd`）`-PreferIdle`（优先挑未在使用的进程，见下）`-DryRun` `-Once` `-NoSelfProtect`
+
+【白名单的三种改法】① 双击 `whitelist.cmd`（推荐，选编号）；② `-Pick`（同上的命令行版）；③ 直接编辑 `protect-list.txt`（每行一个进程名）。**三种都立即生效，不用重启守护**；写错名字会有明确提示，不会静默失效。
 
 文件：
 
@@ -284,7 +312,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\windowed-protection.
 - **先 `-DryRun` 跑几天**，看清"它想杀的都是谁"，再决定是否开火。
 - 它**真的会杀掉你的程序，未保存的工作会丢**。默认保护名单只保证"不会杀掉让系统蓝屏/注销/破坏安全软件"的最小集合——**你的应用进程不在保护范围内**。
 - 想保住某个进程，写进 `protect-list.txt`（或 `-AddProtect <name>`）；代价是：它也可能正是内存临界时最大的那个占用者。
-- **在乎未保存的工作？三条路，从轻到重**：① `-ListWindowed` 看清谁握着窗口 → `-AddProtect` 点名保护；② `-WindowedAction Skip`：有窗口的进程一律不强杀（代价是机器可能仍然很紧）；③ 调大 `GracefulSeconds`（默认 15 秒），给"保存 / 放弃"对话框更多时间。紧急档（可用内存 < 3.5%）只有 3 秒——那是最坏情况下的取舍，写在明处。
+- **在乎未保存的工作？三条路，从轻到重**：① **双击 `whitelist.cmd`**（或 `-Pick`）看清谁握着窗口，输入编号即保护；② 直接用 `-Preset safe`：有窗口的进程一律不强杀（代价是机器可能仍然很紧，几乎不用维护名单）；③ 调大 `GracefulSeconds`（默认 15 秒），给"保存 / 放弃"对话框更多时间。紧急档（可用内存 < 3.5%）只有 3 秒——那是最坏情况下的取舍，写在明处。
 - 默认只在你自己的权限范围内生效；以管理员身份运行 = 它也能杀提权进程，请自行评估。
 
 ---

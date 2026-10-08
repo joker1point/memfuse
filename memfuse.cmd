@@ -19,18 +19,14 @@ endlocal
 exit /b %ERRORLEVEL%
 
 :usage
-echo memfuse - last line of defense before the machine freezes
-echo.
-echo Nothing was started: no arguments were given.
-echo.
-echo First steps - a dry run kills nothing:
-echo    memfuse.cmd -Once -DryRun          list the verdict right now
-echo    memfuse.cmd -ListWindowed          who may hold unsaved work
-echo    memfuse.cmd -AddProtect node,code  whitelist a process
-echo    memfuse.cmd -ListProtected         show the effective whitelist
-echo    memfuse.cmd -InstallTask           register the self-healing task
-echo    memfuse.cmd -UninstallTask         remove it again
-echo.
-echo Full parameter list: see README.md or the comment header of memory-guard.ps1
+rem No arguments: open the numbered menu. Nothing is started by itself, and
+rem the menu text comes from the PowerShell side (Chinese renders correctly
+rem there; .cmd text stays ASCII). In a shell without a console -Menu prints
+rem the usage text instead of waiting for input, so it can never hang.
+set "INTERACTIVE="
+echo %CMDCMDLINE% | find /i "%~nx0" >nul && set "INTERACTIVE=1"
+
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0memory-guard.ps1" -Menu
+if defined INTERACTIVE (echo. & echo Press any key to close this window... & pause >nul)
 endlocal
 exit /b 0
