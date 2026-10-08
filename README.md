@@ -215,11 +215,11 @@ incorrectly formatted or out of range.
 
 1. **下载**：本页绿色按钮 `Code` → `Download ZIP`（或 Releases 页的 zip），解压到任意文件夹（放桌面就行，不需要安装任何东西）；
 2. **双击 `memfuse.cmd`** → 出现数字菜单，按 `1` 先演练：什么都不杀，只告诉你"如果真动手，它会挑谁"；
-3. 按 `2` 保护你在乎的程序（列表里输编号：微信、编辑器、CodeBuddy…… 选谁保护谁），再按 `3` 装上守护，然后关掉窗口 —— 完成。
+3. 按 `2` 保护你在乎的程序（列表里输编号：微信、编辑器、CodeBuddy…… 选谁保护谁），再按 `3` 装上守护（**它顺手在桌面放一个「memfuse 内存保险丝」快捷方式**），然后关掉窗口 —— 完成。
 
-菜单里还有 `4` 查看保护名单、`5` 卸载、`0` 退出。**白名单随时改**：再双击一次 `memfuse.cmd` 选 `2`，或直接双击 `whitelist.cmd`。
+菜单里还有 `4` 查看保护名单、`5` 卸载、`0` 退出。**白名单随时改**：双击桌面上那个快捷方式选 `2` 就行（也可以回来双击 `memfuse.cmd`，或 `whitelist.cmd`）。
 
-> 两个细节：`memfuse.cmd` 自带 `-ExecutionPolicy Bypass` 启动脚本，所以"新下载的脚本被 Windows 拦住"不会发生；安装守护也不需要管理员权限。
+> 三个细节：① `memfuse.cmd` 自带 `-ExecutionPolicy Bypass` 启动脚本，所以"新下载的脚本被 Windows 拦住"不会发生；② 安装守护不需要管理员权限；③ **快捷方式是"在你电脑上现建"的**——.lnk 里存的是绝对路径，随 zip 附带的必然是死链（指向打包者的机器），所以只能由脚本生成。卸载会一并删掉它；若你把文件夹搬了家、快捷方式失效，重新双击 `memfuse.cmd` 按 `3` 即可重建。
 
 ### 想敲命令？（等价写法）
 
@@ -243,6 +243,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Pick
 powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -AddProtect 微信,Code
 powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -RemoveProtect 微信
 
+# 4.5) 桌面快捷方式（装守护时自动创建；文件夹搬家后可用这两条重建 / 删除）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -CreateShortcut
+powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -RemoveShortcut
+
 # 5) 不想维护名单？用三档预设选一个策略（见下）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Preset safe -InstallTask
 ```
@@ -258,6 +262,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Preset s
 全部参数（默认值见括号）：`-WarnPercent`(12) `-CriticalPercent`(7) `-SustainSamples`(3) `-IntervalSec`(5) `-CooldownSec`(60) `-MinCandidateMB`(300) `-MaxKillsPerHour`(6) `-GracefulSeconds`(15) `-WindowedAction`(Close) `-Preset`(safe/balanced/aggressive) `-Protect node,code` `-ProtectFile .\protect-list.txt` `-AddProtect` `-RemoveProtect` `-Pick`
 
 【查看类】`-ListProtected`（现有名单，含"当前未运行"标注）`-ListWindowed`（谁有窗口）`-Help`（中文用法）`-Menu`（数字菜单，等同双击 `memfuse.cmd`）`-PreferIdle`（优先挑未在使用的进程，见下）`-DryRun` `-Once` `-NoSelfProtect`
+
+【快捷方式】`-CreateShortcut`（在桌面放一个回到菜单的快捷方式；`-InstallTask` 会顺手做）`-RemoveShortcut`（删掉它）
 
 【白名单的三种改法】① 双击 `whitelist.cmd`（推荐，选编号）；② `-Pick`（同上的命令行版）；③ 直接编辑 `protect-list.txt`（每行一个进程名）。**三种都立即生效，不用重启守护**；写错名字会有明确提示，不会静默失效。
 

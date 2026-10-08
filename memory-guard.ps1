@@ -150,7 +150,20 @@
     but the task runs with the current user's privileges.
 
 .PARAMETER UninstallTask
-    Unregister the MemoryGuard scheduled task and exit.
+    Unregister the MemoryGuard scheduled task and exit. Also removes the
+    desktop shortcut, if one was created.
+
+.PARAMETER CreateShortcut
+    Put a desktop shortcut ("memfuse 内存保险丝.lnk") next to the user. It
+    points at memfuse.cmd, so a later double-click reopens the numbered menu
+    without hunting for the extracted folder. -InstallTask does this too.
+
+.PARAMETER RemoveShortcut
+    Delete that desktop shortcut and exit.
+
+.PARAMETER ShortcutDir
+    Which folder gets the shortcut. Default: the user's Desktop. Mainly for
+    tests, so a suite can exercise this without touching the real desktop.
 
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Once -DryRun
@@ -210,7 +223,10 @@ param(
     [ValidateSet('safe', 'balanced', 'aggressive')][string]$Preset,
     [switch]$Help,
     [switch]$InstallTask,
-    [switch]$UninstallTask
+    [switch]$UninstallTask,
+    [switch]$CreateShortcut,
+    [switch]$RemoveShortcut,
+    [string]$ShortcutDir
 )
 
 $ErrorActionPreference = 'Continue'
@@ -631,7 +647,8 @@ function Show-Menu {
                 Write-Host ''
                 Write-Host '>>> 安装守护'
                 Install-GuardTask
-                Write-Host '>>> 装好了。现在可以关掉这个窗口 —— 之后它自己会跑，白名单随时改。'
+                Write-Host '>>> 装好了。现在可以关掉这个窗口 —— 之后它自己会跑。'
+                Write-Host '    以后改白名单：双击桌面上那个「memfuse 内存保险丝」快捷方式，按 2 就行。'
             }
             '4' { Write-Host ''; Show-ProtectList }
             '5' {
@@ -1008,6 +1025,57 @@ function Show-Config {
 # ---------------------------------------------------------------------------
 # scheduled task management
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# desktop shortcut: one double-click to come back here (whitelist edits)
+# ---------------------------------------------------------------------------
+function Get-ShortcutPath {
+    $dir = $ShortcutDir
+    if (-not $dir) { $dir = [Environment]::GetFolderPath('Desktop') }
+    if (-not $dir) { return $null }
+    return (Join-Path $dir 'memfuse 内存保险丝.lnk')
+}
+
+function Set-Shortcut {
+    param([switch]$Remove)
+
+    $lnk = Get-ShortcutPath
+    if (-not $lnk) { Write-Host 'WARN  找不到桌面目录，已跳过快捷方式'; return }
+    $dir = Split-Path -Parent $lnk
+    if (-not (Test-Path -LiteralPath $dir)) { Write-Host ('WARN  目录不存在，已跳过：{0}' -f $dir); return }
+
+    if ($Remove) {
+        if (-not (Test-Path -LiteralPath $lnk)) { Write-Host '没有快捷方式需要删除（本来就没有）'; return }
+        Remove-Item -LiteralPath $lnk -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $lnk) { Write-Host ('WARN  删不掉：{0}' -f $lnk) }
+        else { Write-Host ('已删除快捷方式：{0}' -f $lnk) }
+        return
+    }
+
+    # Point at the launcher when it sits next to this script; otherwise fall
+    # back to powershell.exe so a standalone memory-guard.ps1 still works.
+    # Never ship a .lnk file inside the repo: a shortcut stores an absolute
+    # path, so one built on another machine would be a dead link.
+    $cmd = Join-Path $PSScriptRoot 'memfuse.cmd'
+    $shell = New-Object -ComObject WScript.Shell
+    $sc = $shell.CreateShortcut($lnk)
+    if (Test-Path -LiteralPath $cmd) {
+        $sc.TargetPath = $cmd
+        $sc.Arguments = ''
+    } else {
+        $sc.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $sc.Arguments = ('-NoProfile -ExecutionPolicy Bypass -File "{0}" -Menu' -f $PSCommandPath)
+    }
+    $sc.WorkingDirectory = $PSScriptRoot
+    $sc.Description = 'memfuse 内存保险丝：双击打开菜单（保护程序 / 看名单 / 卸载）'
+    try {
+        $sc.Save()
+        Write-Host ('快捷方式已就位：{0}' -f $lnk)
+        Write-Host '  以后改白名单：双击它 → 按 2。不用再找这个文件夹。'
+    } catch {
+        Write-Host ('WARN  快捷方式创建失败：{0}' -f $_.Exception.Message)
+    }
+}
+
 function Install-GuardTask {
     $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $argLine = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $PSCommandPath
@@ -1062,6 +1130,8 @@ function Install-GuardTask {
     } catch { }
     Write-Host 'starts at logon and self-heals within 5 minutes if it ever dies. Start it now with:'
     Write-Host ('      Start-ScheduledTask -TaskName {0}' -f $TaskName)
+    Write-Host ''
+    Set-Shortcut
 }
 
 function Uninstall-GuardTask {
@@ -1071,6 +1141,7 @@ function Uninstall-GuardTask {
     } catch {
         Write-Host ('nothing to remove (task {0} not found)' -f $TaskName)
     }
+    Set-Shortcut -Remove
 }
 
 # ---------------------------------------------------------------------------
@@ -1084,6 +1155,8 @@ if ($ListWindowed) { Show-WindowedProcesses; exit 0 }
 if ($Pick) { Invoke-PickWhitelist -Answer $PickInput; exit 0 }
 if (@($AddProtect).Count -gt 0 -or @($RemoveProtect).Count -gt 0) { [void](Set-ProtectEntries -Add $AddProtect -Remove $RemoveProtect); exit 0 }
 if ($InstallTask) { Install-GuardTask; exit 0 }
+if ($CreateShortcut) { Set-Shortcut; exit 0 }
+if ($RemoveShortcut) { Set-Shortcut -Remove; exit 0 }
 if ($WarnPercent -le $CriticalPercent) { throw 'WarnPercent must be greater than CriticalPercent' }
 
 Show-Config
