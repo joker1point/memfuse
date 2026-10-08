@@ -195,6 +195,7 @@ param(
     [string]$ProtectFile,
     [string]$LogDir,
     [bool]$DesktopAlert = $true,
+    [switch]$PreferIdle,
     [switch]$NoSelfProtect,
     [switch]$DryRun,
     [switch]$Once,
@@ -728,6 +729,68 @@ function Get-MemorySample {
     }
 }
 
+# ---------------------------------------------------------------------------
+# -PreferIdle: choosing a victim that the user is not working in
+#
+# Freeing memory is still the job, so the working set stays the base of the
+# score. On top of it, three cheap signals say "the user is probably not working
+# in this right now": it is not the foreground window, its window is minimised,
+# or it used almost no CPU during the last sampling interval. Each one discounts
+# the candidate, so a large unused process beats an equally large one the user is
+# looking at - without ever preferring a tiny process just because it is idle.
+# Every discount is recorded and logged, so a kill can always be explained.
+# ---------------------------------------------------------------------------
+Add-Type -Namespace MemGuard -Name Win -MemberDefinition @'
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+'@
+
+function Get-ForegroundPid {
+    try {
+        $h = [MemGuard.Win]::GetForegroundWindow()
+        if ($h -eq [IntPtr]::Zero) { return 0 }
+        $fgPid = 0
+        [void][MemGuard.Win]::GetWindowThreadProcessId($h, [ref]$fgPid)
+        return [int]$fgPid
+    } catch {
+        return 0
+    }
+}
+
+function Update-CpuSnapshot {
+    # One dictionary per sampling tick; the difference between two ticks is what
+    # tells whether a process was actually doing work.
+    $snap = @{}
+    try {
+        foreach ($p in @(Get-Process -ErrorAction SilentlyContinue)) {
+            try { $snap[[int]$p.Id] = [double]$p.TotalProcessorTime.TotalSeconds } catch { }
+        }
+    } catch { }
+    $script:cpuPrev = $script:cpuNow
+    $script:cpuNow = $snap
+}
+
+function Get-VictimScore {
+    param(
+        [long]$WorkingSet64,
+        [switch]$Foreground,
+        [switch]$Minimized,
+        [switch]$Busy,
+        [switch]$CpuKnown
+    )
+    # Discounts stay mild for "working" signals on purpose: a build or an encode
+    # in the background still deserves to survive, but a 900MB busy process must
+    # not lose to a 500MB idle one - relieving memory is still the job. Only the
+    # foreground window gets a hard discount: that is the app the user is typing
+    # into right now.
+    $score = [double]$WorkingSet64
+    if ($Minimized) { $score *= 0.7 }
+    if ($CpuKnown -and $Busy) { $score *= 0.7 }
+    if ($Foreground) { $score *= 0.2 }
+    return [math]::Round($score)
+}
+
 function Get-Candidates {
     param([int]$TopN)
     $minBytes = [long]$MinCandidateMB * 1MB
@@ -744,7 +807,36 @@ function Get-Candidates {
         (-not (Test-Protected $_.ProcessName)) -and
         (-not $script:SelfChain.Contains($_.Id))
     })
-    return @($list | Sort-Object WorkingSet64 -Descending | Select-Object -First $TopN)
+    if (-not $PreferIdle) {
+        return @($list | Sort-Object WorkingSet64 -Descending | Select-Object -First $TopN)
+    }
+
+    # -PreferIdle: score every candidate and remember why, so the log can show it.
+    $fgPid = Get-ForegroundPid
+    $busySeconds = 0.3 * $IntervalSec
+    $script:lastPickReason = @{}
+    $scored = @($list | ForEach-Object {
+        $minimized = $false
+        try { $minimized = ($_.MainWindowHandle -ne [IntPtr]::Zero -and [MemGuard.Win]::IsIconic($_.MainWindowHandle)) } catch { }
+        $known = $false
+        $busy = $false
+        if ($script:cpuNow -and $script:cpuPrev -and
+            $script:cpuNow.ContainsKey([int]$_.Id) -and $script:cpuPrev.ContainsKey([int]$_.Id)) {
+            $known = $true
+            $busy = (($script:cpuNow[[int]$_.Id] - $script:cpuPrev[[int]$_.Id]) -ge $busySeconds)
+        }
+        $isForeground = ($_.Id -eq $fgPid)
+        $reason = @()
+        if ($isForeground) { $reason += 'foreground' }
+        if ($minimized) { $reason += 'minimized' }
+        if ($known) { $reason += $(if ($busy) { 'cpu-busy' } else { 'cpu-idle' }) } else { $reason += 'cpu-unknown' }
+        $script:lastPickReason[[int]$_.Id] = ($reason -join ',')
+        [pscustomobject]@{
+            Proc  = $_
+            Score = Get-VictimScore -WorkingSet64 $_.WorkingSet64 -Foreground:$isForeground -Minimized:$minimized -Busy:$busy -CpuKnown:$known
+        }
+    })
+    return @($scored | Sort-Object Score -Descending | Select-Object -First $TopN | ForEach-Object { $_.Proc })
 }
 
 function Stop-TargetProcess {
@@ -804,7 +896,11 @@ log: {4}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $AvailMB, $AvailPct, $Min
     }
 
     $preview = ($cands | ForEach-Object {
-        '{0}#{1}={2}MB' -f $_.ProcessName, $_.Id, [int][math]::Round($_.WorkingSet64 / 1MB)
+        $tag = ''
+        if ($PreferIdle -and $script:lastPickReason -and $script:lastPickReason.ContainsKey([int]$_.Id)) {
+            $tag = '[' + $script:lastPickReason[[int]$_.Id] + ']'
+        }
+        '{0}#{1}={2}MB{3}' -f $_.ProcessName, $_.Id, [int][math]::Round($_.WorkingSet64 / 1MB), $tag
     }) -join ' | '
     Write-Log ('{0} avail {1}MB ({2}%) commit {3}% total {4}MB - candidates: {5}' -f $tag, $AvailMB, $AvailPct, $CommitPct, $TotalMB, $preview)
 
@@ -827,13 +923,18 @@ log: {4}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $AvailMB, $AvailPct, $Min
         $windowed = $false
         try { $windowed = ($proc.MainWindowHandle -ne [IntPtr]::Zero) } catch { }
 
+        $why = ''
+        if ($PreferIdle -and $script:lastPickReason -and $script:lastPickReason.ContainsKey([int]$proc.Id)) {
+            $why = ' reason=' + $script:lastPickReason[[int]$proc.Id]
+        }
+
         if ($DryRun) {
             $note = if ($windowed) { ' [has a window -> WindowedAction=' + $WindowedAction + ']' } else { '' }
-            Write-Log ('DRY-RUN would kill {0} pid={1} ws={2}MB path={3} cmd={4}{5}' -f $procName, $proc.Id, $wsMB, $path, $cmd, $note)
+            Write-Log ('DRY-RUN would kill {0} pid={1} ws={2}MB path={3} cmd={4}{5}{6}' -f $procName, $proc.Id, $wsMB, $path, $cmd, $note, $why)
             return $false
         }
 
-        Write-Log ('ACTION  killing {0} pid={1} ws={2}MB path={3} cmd={4}' -f $procName, $proc.Id, $wsMB, $path, $cmd)
+        Write-Log ('ACTION  killing {0} pid={1} ws={2}MB path={3} cmd={4}{5}' -f $procName, $proc.Id, $wsMB, $path, $cmd, $why)
 
         $verdict = Stop-TargetProcess -Proc $proc -Emergency:$Emergency
         if ($verdict -eq 'skipped') {
@@ -894,6 +995,7 @@ function Show-Config {
     Write-Host ('刹车        : 冷却 {0}s，每小时最多 {1} 次，候选不小于 {2} MB' -f $CooldownSec, $MaxKillsPerHour, $MinCandidateMB)
     Write-Host ('受保护      : 共 {0} 项（系统内置 {1} + 用户白名单 {2}）' -f ($protectSet.Count + $script:fileProtect.Count), $SystemProtected.Count, (($protectSet.Count - $SystemProtected.Count) + $script:fileProtect.Count))
     Write-Host ('有窗口的进程: {0}（宽限期 {1}s，紧急档 {2}s）' -f $WindowedAction, [math]::Max($GracefulSeconds, 1), [math]::Min([math]::Max($GracefulSeconds, 1), 3))
+    Write-Host ('选择策略    : {0}' -f ($(if ($PreferIdle) { '优先挑未在使用（体积 × 使用信号折扣）' } else { '谁大挑谁（默认）' })))
     if ($script:SelfChain.Count -gt 0) {
         Write-Host ('自我保护    : pid {0}（守护自身及启动它的链）' -f (($script:SelfChain | Sort-Object) -join ', '))
     } else {
@@ -1007,10 +1109,17 @@ $lastWarn = [datetime]::MinValue
 $lastKill = [datetime]::MinValue
 $killTimes = New-Object 'System.Collections.Generic.List[datetime]'
 
+# -PreferIdle needs two CPU snapshots to see who is actually working, plus the
+# per-candidate reason strings so every choice can be explained in the log.
+$script:cpuPrev = $null
+$script:cpuNow = $null
+$script:lastPickReason = @{}
+
 while ($true) {
     Update-ProtectFileSet
     try {
         $sample = Get-MemorySample
+        if ($PreferIdle) { Update-CpuSnapshot }
     } catch {
         Write-Log ('ERROR sampling memory: {0}' -f $_.Exception.Message)
         Start-Sleep -Seconds $IntervalSec

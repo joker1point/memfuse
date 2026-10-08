@@ -51,6 +51,29 @@
 
 300MB 地板的意义：如果连最大的进程都不到 300MB，说明内存不是被单进程吃掉的，杀谁都白杀——此时只告警，不动手。
 
+#### 可选项 `-PreferIdle`：优先挑"你没在用的那个"
+
+默认规则是"谁大杀谁"，它可能杀掉你正在看的浏览器。加上 `-PreferIdle` 后，选择改成**给体积打折**：
+
+| 信号 | 怎么判定 | 折扣 |
+|---|---|---|
+| 前台窗口 | `GetForegroundWindow` 命中的进程（你此刻正在用的那个） | ×0.2 |
+| 窗口已最小化 | `IsIconic` | ×0.7 |
+| 近一个采样周期 CPU 在跑 | 与上一轮 CPU 时间差 ≥ 0.3 × `-IntervalSec` | ×0.7 |
+
+**为什么折扣这么克制**：把内存腾出来仍是本职。折扣太狠的话，900MB 的忙碌进程会输给 500MB 的闲进程 —— 等于为了"不打扰"牺牲了效果。所以只有"前台"给硬折扣（那是你此刻在打字的应用），其余只是轻微降权，**体积仍是分数的主体**。
+
+判定理由会写进日志，可逐条核对：
+
+```text
+candidates: CodeBuddy CN#26688=721MB[cpu-idle] | … | CodeBuddy CN#62840=730MB[cpu-busy] | …
+DRY-RUN would kill CodeBuddy CN pid=26688 ws=721MB … reason=cpu-idle
+```
+
+一个必须说清的取舍：**忙碌的大进程可能因此不被选中**（排到靠后，甚至落在候选截断之外）。这正是该选项的语义 —— 优先"不打扰"，而不是"效果最大化"。要效果最大化，就别开它。
+
+单元测试（不启动守护本体，用 AST 抽出打分函数来验）：`tests/victim-score.ps1`。
+
 ### 3) 怎么动
 
 先礼后兵，并留下证据：
@@ -234,7 +257,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Preset s
 
 全部参数（默认值见括号）：`-WarnPercent`(12) `-CriticalPercent`(7) `-SustainSamples`(3) `-IntervalSec`(5) `-CooldownSec`(60) `-MinCandidateMB`(300) `-MaxKillsPerHour`(6) `-GracefulSeconds`(15) `-WindowedAction`(Close) `-Preset`(safe/balanced/aggressive) `-Protect node,code` `-ProtectFile .\protect-list.txt` `-AddProtect` `-RemoveProtect` `-Pick`
 
-【查看类】`-ListProtected`（现有名单，含"当前未运行"标注）`-ListWindowed`（谁有窗口）`-Help`（中文用法）`-Menu`（数字菜单，等同双击 `memfuse.cmd`）`-DryRun` `-Once` `-NoSelfProtect`
+【查看类】`-ListProtected`（现有名单，含"当前未运行"标注）`-ListWindowed`（谁有窗口）`-Help`（中文用法）`-Menu`（数字菜单，等同双击 `memfuse.cmd`）`-PreferIdle`（优先挑未在使用的进程，见下）`-DryRun` `-Once` `-NoSelfProtect`
 
 【白名单的三种改法】① 双击 `whitelist.cmd`（推荐，选编号）；② `-Pick`（同上的命令行版）；③ 直接编辑 `protect-list.txt`（每行一个进程名）。**三种都立即生效，不用重启守护**；写错名字会有明确提示，不会静默失效。
 
