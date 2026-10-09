@@ -217,7 +217,9 @@ incorrectly formatted or out of range.
 2. **双击 `memfuse.cmd`** → 出现数字菜单，按 `1` 先演练：什么都不杀，只告诉你"如果真动手，它会挑谁"；
 3. 按 `2` 保护你在乎的程序（列表里输编号：微信、编辑器、CodeBuddy…… 选谁保护谁），再按 `3` 装上守护（**它顺手在桌面放一个「memfuse 内存保险丝」快捷方式**），然后关掉窗口 —— 完成。
 
-菜单里还有 `4` 查看保护名单、`5` 卸载、`0` 退出。**白名单随时改**：双击桌面上那个快捷方式选 `2` 就行（也可以回来双击 `memfuse.cmd`，或 `whitelist.cmd`）。
+菜单里还有 `4` 查看保护名单、`5` 卸载、`6` 放进托盘、`0` 退出。**白名单随时改**：双击桌面上那个快捷方式选 `2` 就行（也可以回来双击 `memfuse.cmd`，或 `whitelist.cmd`）。
+
+**想让它常驻托盘？** 双击 `tray.cmd`（或在菜单里按 `6`）：窗口消失，通知区出现一个图标；右键它能打开菜单 / 保护名单 / 名单文件 / 今天的日志 / 工具文件夹，鼠标悬停显示实时可用内存百分比。**关掉窗口它在** —— 控制台的 X 无法被取消（Windows 一定会结束那个进程），所以实现方式是"立刻以隐藏方式把自己重新拉起"，托盘与守护都继续。
 
 > 三个细节：① `memfuse.cmd` 自带 `-ExecutionPolicy Bypass` 启动脚本，所以"新下载的脚本被 Windows 拦住"不会发生；② 安装守护不需要管理员权限；③ **快捷方式是"在你电脑上现建"的**——.lnk 里存的是绝对路径，随 zip 附带的必然是死链（指向打包者的机器），所以只能由脚本生成。卸载会一并删掉它；若你把文件夹搬了家、快捷方式失效，重新双击 `memfuse.cmd` 按 `3` 即可重建。
 
@@ -247,6 +249,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -RemovePr
 powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -CreateShortcut
 powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -RemoveShortcut
 
+# 4.6) 托盘模式：窗口隐藏，通知区图标常驻（关掉窗口它会重新拉起自己）
+powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Tray
+
 # 5) 不想维护名单？用三档预设选一个策略（见下）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Preset safe -InstallTask
 ```
@@ -264,6 +269,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Preset s
 【查看类】`-ListProtected`（现有名单，含"当前未运行"标注）`-ListWindowed`（谁有窗口）`-Help`（中文用法）`-Menu`（数字菜单，等同双击 `memfuse.cmd`）`-PreferIdle`（优先挑未在使用的进程，见下）`-DryRun` `-Once` `-NoSelfProtect`
 
 【快捷方式】`-CreateShortcut`（在桌面放一个回到菜单的快捷方式；`-InstallTask` 会顺手做）`-RemoveShortcut`（删掉它）
+
+【托盘】`-Tray`（窗口隐藏 + 通知区图标：右键打开菜单/名单/日志，悬停看实时可用内存；关掉窗口也不丢，会以隐藏方式把自己重新拉起）
 
 【白名单的三种改法】① 双击 `whitelist.cmd`（推荐，选编号）；② `-Pick`（同上的命令行版）；③ 直接编辑 `protect-list.txt`（每行一个进程名）。**三种都立即生效，不用重启守护**；写错名字会有明确提示，不会静默失效。
 

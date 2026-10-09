@@ -165,6 +165,19 @@
     Which folder gets the shortcut. Default: the user's Desktop. Mainly for
     tests, so a suite can exercise this without touching the real desktop.
 
+.PARAMETER Tray
+    Live in the notification area instead of a window. The console window is
+    hidden and an icon appears with a right-click menu (menu / protected list /
+    protect-list.txt / today's log / the folder). The tooltip shows the current
+    free-memory percentage, so "is it alive" is answerable at a glance.
+
+    The X button of a console window cannot be cancelled (Windows kills the
+    process a few seconds after CTRL_CLOSE_EVENT no matter what the handler
+    does), so closing the window does not "prevent" anything: the process
+    relaunches itself hidden - with the same arguments - and the tray stays. If
+    the scheduled task is not installed, tray mode also keeps guarding; if the
+    task is running, it is a companion only, so two guards never race.
+
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Once -DryRun
 
@@ -226,7 +239,8 @@ param(
     [switch]$UninstallTask,
     [switch]$CreateShortcut,
     [switch]$RemoveShortcut,
-    [string]$ShortcutDir
+    [string]$ShortcutDir,
+    [switch]$Tray
 )
 
 $ErrorActionPreference = 'Continue'
@@ -613,18 +627,19 @@ function Show-Menu {
         Write-Host '   3  装上守护（登录自动生效 + 每 5 分钟自愈，不需要管理员）'
         Write-Host '   4  查看保护名单'
         Write-Host '   5  卸载守护'
+        Write-Host '   6  放进托盘（关掉这个窗口也还在，右键托盘图标可回来）'
         Write-Host '   0  退出'
         Write-Host ''
 
         $answer = ''
         if ($queue.Count -gt 0) {
             $answer = $queue.Dequeue()
-            Write-Host ('请输入数字（0-5），回车确认： {0}' -f $answer)
+            Write-Host ('请输入数字（0-6），回车确认： {0}' -f $answer)
         } elseif ([Console]::IsInputRedirected) {
             Show-Usage
             return
         } else {
-            $answer = [string](Read-Host '请输入数字（0-5），回车确认')
+            $answer = [string](Read-Host '请输入数字（0-6），回车确认')
         }
 
         switch ($answer.Trim()) {
@@ -659,7 +674,12 @@ function Show-Menu {
                 if (@('y', 'yes', '是') -contains $yes.Trim().ToLower()) { Write-Host ''; Uninstall-GuardTask }
                 else { Write-Host '已取消，什么都没变。' }
             }
-            default { Write-Host ('没看懂「{0}」—— 请输入 0 到 5 之间的数字。' -f $answer) }
+            '6' {
+                Write-Host ''
+                Write-Host '>>> 放进托盘'
+                Show-Tray
+            }
+            default { Write-Host ('没看懂「{0}」—— 请输入 0 到 6 之间的数字。' -f $answer) }
         }
 
         if ($queue.Count -eq 0 -and -not [Console]::IsInputRedirected) { $null = Read-Host '（按回车回到菜单）' }
@@ -1076,6 +1096,138 @@ function Set-Shortcut {
     }
 }
 
+# ---------------------------------------------------------------------------
+# tray mode / close-to-background
+#
+# Two hard facts drive the design:
+#   1. A console window's X cannot be cancelled. Windows sends
+#      CTRL_CLOSE_EVENT, waits for the handler, then terminates the process
+#      anyway. So "minimise to tray" is implemented as: spawn an equivalent
+#      hidden instance and let this one die.
+#   2. Two guards killing at the same time would double the kills, so tray mode
+#      only guards when the scheduled task is absent.
+# ---------------------------------------------------------------------------
+function Initialize-ControlHelper {
+    if ($script:ControlReady) { return }
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    Add-Type -Namespace MF -Name Control -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr h, int n);
+[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern System.IntPtr GetConsoleWindow();
+[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern bool SetConsoleCtrlHandler(HandlerRoutine h, bool add);
+public delegate bool HandlerRoutine(uint t);
+public static string Script = "";
+public static string Extra = "";
+public static bool OnClose(uint t) {
+    // Only CTRL_CLOSE_EVENT (2): CTRL_LOGOFF_EVENT would spawn a doomed copy
+    // every time the user logs off.
+    if (t == 2) {
+        try {
+            var psi = new System.Diagnostics.ProcessStartInfo("powershell.exe",
+                "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"" + Script + "\"" + Extra);
+            psi.UseShellExecute = false;
+            System.Diagnostics.Process.Start(psi);
+        } catch { }
+    }
+    return false;
+}
+public static void Hook(string script, string extra) {
+    Script = script;
+    Extra = extra;
+    SetConsoleCtrlHandler(new HandlerRoutine(OnClose), true);
+}
+'@
+    $script:ControlReady = $true
+}
+
+function Enable-CloseToBackground {
+    # Closing this window relaunches the same command hidden, so the work keeps
+    # running without a window. -Once runs are excluded: they are meant to end.
+    param([switch]$CanGuard)
+
+    if ($Once) { return }
+    try {
+        Initialize-ControlHelper
+        $extra = ''
+        try {
+            $cmd = [Environment]::CommandLine
+            $i = $cmd.IndexOf($PSCommandPath, [StringComparison]::OrdinalIgnoreCase)
+            if ($i -ge 0) { $extra = $cmd.Substring($i + $PSCommandPath.Length).TrimStart('"', ' ') }
+        } catch { }
+        if ($extra -notmatch '-Tray') {
+            if ($CanGuard -and -not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) { $extra = ($extra + ' -Tray').Trim() }
+        }
+        [MF.Control]::Hook($PSCommandPath, (' ' + $extra))
+        Write-Log ('close-to-background: armed (closing the window relaunches it hidden: {0})' -f $extra)
+    } catch {
+        Write-Log ('close-to-background: not armed ({0})' -f $_.Exception.Message)
+    }
+}
+
+function Show-Tray {
+    Initialize-ControlHelper
+
+    # The tray is an entry point + live status, not a second guard: two guards
+    # killing at the same time would double the kills. If the task is missing,
+    # the tray says so and the menu installs it.
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    $statusFile = Join-Path $env:TEMP 'mf-tray-status.txt'
+
+    [void][MF.Control]::ShowWindow([MF.Control]::GetConsoleWindow(), 0)   # SW_HIDE
+    Enable-CloseToBackground -CanGuard
+
+    $ni = New-Object System.Windows.Forms.NotifyIcon
+    try { $ni.Icon = [System.Drawing.SystemIcons]::Shield } catch { $ni.Icon = [System.Drawing.SystemIcons]::Application }
+    $ni.Text = 'memfuse 内存守护'
+
+    $menu = New-Object System.Windows.Forms.ContextMenuStrip
+    $mi = $menu.Items.Add('打开菜单（1 演练 / 2 白名单 / 3 安装）')
+    $mi.add_Click({ Start-Process -FilePath (Join-Path $PSScriptRoot 'memfuse.cmd') })
+    $mi = $menu.Items.Add('查看保护名单')
+    $mi.add_Click({ Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-ListProtected') })
+    $mi = $menu.Items.Add('编辑名单文件 protect-list.txt')
+    $mi.add_Click({ Start-Process -FilePath 'notepad.exe' -ArgumentList (Join-Path $PSScriptRoot 'protect-list.txt') })
+    $mi = $menu.Items.Add('看今天的日志')
+    $mi.add_Click({ Start-Process -FilePath 'notepad.exe' -ArgumentList $LogFile })
+    $mi = $menu.Items.Add('打开工具所在文件夹')
+    $mi.add_Click({ Start-Process -FilePath 'explorer.exe' -ArgumentList $PSScriptRoot })
+    $mi = $menu.Items.Add('退出托盘（守护若在跑则不受影响）')
+    $mi.add_Click({ $script:trayStop = $true })
+    $ni.ContextMenuStrip = $menu
+    $ni.Visible = $true
+    $script:trayStop = $false
+
+    Write-Host '托盘已就位：右键托盘图标可打开菜单 / 名单 / 日志。这个窗口可以关掉，它会转入后台继续。'
+    Write-Host ('守护状态：{0}' -f $(if ($task) { $task.State } else { '未安装 —— 右键托盘图标 → 打开菜单 → 按 3 装上' }))
+
+    $tick = 0
+    while (-not $script:trayStop) {
+        [System.Windows.Forms.Application]::DoEvents()
+
+        if ($tick % 2 -eq 0) {
+            try {
+                $s = Get-MemorySample
+                $state = if ($task) { '运行中' } else { '未安装' }
+                $ni.Text = ('memfuse · 可用 {0}% · 守护{1}' -f $s.AvailPct, $state)
+                # hwnd included: a console window belongs to conhost.exe, so
+                # nobody outside can find it by this process id - and it is what
+                # the tray test (and any future script) needs to show/hide it.
+                $hwnd = [MF.Control]::GetConsoleWindow()
+                [IO.File]::WriteAllText($statusFile,
+                    ('{0}  pid={1}  hwnd=0x{2:X}  avail={3}%  commit={4}%  task={5}' -f (Get-Date -Format 'HH:mm:ss'), $PID, [int64]$hwnd, $s.AvailPct, $s.CommitPct, $state),
+                    (New-Object System.Text.UTF8Encoding($false)))
+            } catch { }
+        }
+
+        $tick++
+        Start-Sleep -Milliseconds 450
+    }
+
+    $ni.Visible = $false
+    $ni.Dispose()
+    Write-Host '托盘已退出。'
+}
+
 function Install-GuardTask {
     $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $argLine = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $PSCommandPath
@@ -1148,6 +1300,7 @@ function Uninstall-GuardTask {
 # main
 # ---------------------------------------------------------------------------
 if ($Menu) { Show-Menu -Scripted $MenuInput; exit 0 }
+if ($Tray) { Show-Tray; exit 0 }
 if ($UninstallTask) { Uninstall-GuardTask; exit 0 }
 if ($Help) { Show-Usage; exit 0 }
 if ($ListProtected) { Show-ProtectList; exit 0 }
@@ -1157,6 +1310,12 @@ if (@($AddProtect).Count -gt 0 -or @($RemoveProtect).Count -gt 0) { [void](Set-P
 if ($InstallTask) { Install-GuardTask; exit 0 }
 if ($CreateShortcut) { Set-Shortcut; exit 0 }
 if ($RemoveShortcut) { Set-Shortcut -Remove; exit 0 }
+
+# From here on this process runs for a long time (a guard), so closing its
+# console window must not silently end the protection: the handler relaunches
+# the same command hidden.
+Enable-CloseToBackground
+
 if ($WarnPercent -le $CriticalPercent) { throw 'WarnPercent must be greater than CriticalPercent' }
 
 Show-Config
