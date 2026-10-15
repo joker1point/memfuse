@@ -15,6 +15,14 @@
 #     "minimise to tray" is implemented as "relaunch hidden".
 #
 # The scheduled task is never touched: this test only starts its own copy.
+#
+# A tray the USER started is never touched either. The status file path is
+# fixed (%TEMP%\mf-tray-status.txt), so a second tray overwrites this test's
+# heartbeat and the two cannot be told apart - and the cleanup must never
+# KillTree a process it did not start. If a -Tray instance is already
+# running the test skips cleanly (same rule as tests/windowed-protection.ps1:
+# refuse to guess which one would be ours), and the final cleanup only ever
+# kills the pids this test started itself.
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -56,6 +64,16 @@ function KillTree([int]$Root) {
     Stop-Process -Id $Root -Force -ErrorAction SilentlyContinue
 }
 
+# A tray the user started must never become this test's target: the status
+# file path is fixed, so a second tray would overwrite this test's heartbeat
+# (the test cannot tell them apart) and the cleanup below must not kill it.
+$foreign = @(Get-TrayProcesses)
+if ($foreign.Count -gt 0) {
+    $pids = (($foreign | ForEach-Object { $_.ProcessId }) -join ', ')
+    Write-Host ('[SKIP] a -Tray instance is already running (pid {0}) - refusing to guess which one would be ours.' -f $pids)
+    exit 0
+}
+
 Remove-Item -LiteralPath $status -Force -ErrorAction SilentlyContinue
 Start-Process powershell -WindowStyle Hidden -ArgumentList @(
     '-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $script, '-Tray') | Out-Null
@@ -89,8 +107,14 @@ if ($second) {
 }
 
 Start-Sleep -Seconds 2
-$left = @(Get-TrayProcesses)
-Check 'no leftovers' ($left.Count -eq 0) ('left: ' + $left.Count)
+# Only ever clean up what this test started: a tray the user launched while
+# the test was running must survive (the skip guard above covers the common
+# case; this scoping covers the race).
+$own = New-Object 'System.Collections.Generic.List[int]'
+if ($first) { $own.Add($first.Pid) }
+if ($second) { $own.Add($second.Pid) }
+$left = @(Get-TrayProcesses | Where-Object { $own.Contains($_.ProcessId) })
+Check 'no leftovers of our own' ($left.Count -eq 0) ('left: ' + (($left | ForEach-Object { $_.ProcessId }) -join ','))
 foreach ($x in $left) { KillTree $x.ProcessId }
 
 if ($fail) { Write-Host ('{0} check(s) failed' -f $fail); exit 1 }

@@ -112,6 +112,37 @@
     hold unsaved work - and exit. Use it to build your whitelist before
     letting the guard act.
 
+:.PARAMETER ShowProcMem
+    Show how much memory the named process(es) use, then exit. The name is
+    matched case-insensitively against the process name (.exe optional), so
+    -ShowProcMem chatgpt finds "ChatGPT". Wildcards work (-ShowProcMem 'chat*')
+    and several names can be queried at once (-ShowProcMem chatgpt,code).
+    Every match is listed with its working set, window title and protected
+    status, followed by the total and its share of physical memory. The figure
+    is the same working set the guard uses when it picks a victim, so "is it
+    the biggest one?" is directly answerable.
+
+:.PARAMETER KillProc
+    Manually kill a process you pick from a list, then exit. The list shows
+    the processes that own a visible window (what "working or frozen" looks
+    like from the outside), frozen ones first, biggest first. Type numbers
+    (space separated) to kill those entries, or type a process name to kill
+    every match (a hung background process has no window, so the name path
+    covers it). Killing requires an explicit y confirmation; anything else
+    cancels. Processes on the built-in/whitelist protection list are never
+    listed and are refused when named. Windowed processes that still respond
+    get a WM_CLOSE first (same -WindowedAction / -GracefulSeconds policy as
+    the guard); hung or windowless ones are force-killed right away. The
+    hourly kill limit does not apply - that brake protects the machine from
+    the guard, not the user from himself. Scripted form: -KillProcInput "1;y"
+    (selection ; confirmation).
+
+:.PARAMETER KillProcInput
+    Scripted answers for -KillProc: "<selection>;<confirmation>", e.g. "1;y"
+    (kill entry 1), "1 3;y", "node;y". The confirmation part is mandatory in
+    a non-interactive shell - without it nothing is killed. Exists so the
+    test suite can drive the flow without a console.
+
 .PARAMETER MaxAttemptsPerRound
     If the top candidate cannot be killed (access denied etc.), try the next
     one, up to this many candidates per round. Default 3.
@@ -170,6 +201,8 @@
     hidden and an icon appears with a right-click menu (menu / protected list /
     protect-list.txt / today's log / the folder). The tooltip shows the current
     free-memory percentage, so "is it alive" is answerable at a glance.
+    Double-clicking the icon opens the menu directly (same action as the first
+    right-click entry).
 
     The X button of a console window cannot be cancelled (Windows kills the
     process a few seconds after CTRL_CLOSE_EVENT no matter what the handler
@@ -229,6 +262,9 @@ param(
     [string[]]$RemoveProtect = @(),
     [switch]$ListProtected,
     [switch]$ListWindowed,
+    [string[]]$ShowProcMem = @(),
+    [switch]$KillProc,
+    [string]$KillProcInput,
     [switch]$Pick,
     [string]$PickInput,
     [switch]$Menu,
@@ -573,6 +609,303 @@ function Show-WindowedProcesses {
     Write-Host '  想更省事：-Preset safe —— 有窗口的程序一律不杀，基本不用维护名单。'
 }
 
+function Test-ProcNameMatch {
+    param([string]$Query, [string]$ProcessName)
+    # Matching rules for -ShowProcMem, kept tiny on purpose:
+    #   * a .exe suffix on either side is ignored (chatgpt == ChatGPT.exe)
+    #   * plain text matches case-insensitively as a substring,
+    #     so "chatgpt" finds "ChatGPT" and "code" finds "CodeBuddy CN"
+    #   * wildcards pass straight through to -like: "chat*", "c?de" work
+    # The process name is what Get-Process returns (never carries .exe), the
+    # query is whatever the user typed, so both sides are normalised here.
+    if (-not $Query -or -not $ProcessName) { return $false }
+    $q = $Query.Trim().Trim('"', "'")
+    $p = ($ProcessName -replace '\.exe$', '')
+    if (-not $q) { return $false }
+    $q = ($q -replace '\.exe$', '')
+    if (-not $q) { return $false }
+    if ($q -match '[\*\?]') { return ($p -like $q) }
+    return ($p.IndexOf($q, [StringComparison]::OrdinalIgnoreCase) -ge 0)
+}
+
+function Show-ProcMemory {
+    param([string[]]$Names)
+
+    # Names may arrive as an array (PowerShell prompt) or as one literal
+    # "chatgpt,code" string (powershell -File); ConvertTo-NameList handles both.
+    $queries = @(ConvertTo-NameList -Names $Names)
+    if ($queries.Count -eq 0) {
+        Write-Host '用法：-ShowProcMem <进程名>（如 chatgpt、chat*、code,node）'
+        return
+    }
+
+    $info = Get-MemorySample
+    $procs = @(Get-Process -ErrorAction SilentlyContinue)
+    $seen = New-Object 'System.Collections.Generic.HashSet[int]'
+    $rows = @()
+    foreach ($proc in $procs) {
+        if (-not $proc.ProcessName) { continue }
+        $hit = $false
+        foreach ($q in $queries) { if (Test-ProcNameMatch -Query $q -ProcessName $proc.ProcessName) { $hit = $true; break } }
+        if (-not $hit) { continue }
+        if (-not $seen.Add([int]$proc.Id)) { continue }   # same pid matched by two queries
+        $title = ''
+        try { $title = [string]$proc.MainWindowTitle } catch { }
+        $rows += [pscustomobject]@{
+            Name      = $proc.ProcessName
+            Pid       = $proc.Id
+            WS_MB     = [int][math]::Round($proc.WorkingSet64 / 1MB)
+            Title     = $title
+            Protected = (Test-Protected $proc.ProcessName)
+        }
+    }
+
+    $label = ($queries -join '、')
+    Write-Host ('=== 进程内存占用：{0} ===' -f $label)
+    if ($rows.Count -eq 0) {
+        Write-Host ('没有找到名字里含 {0} 的进程（当前 {1} 个进程在运行）。' -f $label, $procs.Count)
+        Write-Host '  可能是拼写问题；换个写法试试：'
+        Write-Host '    -ShowProcMem chat*        通配符（* 和 ? 都支持）'
+        Write-Host '    -ShowProcMem code,node    一次查多个名字'
+        Write-Host '    -ListWindowed             看看当前有窗口的进程都有谁'
+        return
+    }
+
+    $rows = @($rows | Sort-Object WS_MB -Descending)
+    $titleWidth = Get-TitleWidth -Reserved 58
+    foreach ($r in $rows) {
+        $state = if ($r.Protected) { '已保护' } else { '可被杀' }
+        $line = '  {0}  {1,-26} pid={2,-7} {3,6} MB' -f $state, $r.Name, $r.Pid, $r.WS_MB
+        if ($r.Title) { $line += '  ' + (Shorten-Text $r.Title $titleWidth) }
+        Write-Host $line
+    }
+    $totalMB = [int](($rows | Measure-Object -Property WS_MB -Sum).Sum)
+    $sharePct = [math]::Round((100.0 * $totalMB / [math]::Max([long]$info.TotalMB, 1)), 1)
+    Write-Host ('共 {0} 个进程，工作集合计 {1} MB（占物理内存 {2}%）。' -f $rows.Count, $totalMB, $sharePct)
+    Write-Host '  口径：工作集 WorkingSet，与守护挑进程时用的是同一个数；'
+    Write-Host '  「已保护」= 守护永远不会终止它（想改：双击 whitelist.cmd）。'
+}
+
+# ---------------------------------------------------------------------------
+# -KillProc: the user kills a process by hand (the guard's opposite number)
+#
+# The guard decides alone under memory pressure; this is the deliberate,
+# confirmed version. It reuses the guard's two safety ideas instead of
+# inventing weaker ones:
+#   * the same protection list (system critical + protect-list.txt) decides
+#     what may never appear as a target - protected names are not listed and
+#     are refused when typed;
+#   * the same Stop-TargetProcess policy applies (WM_CLOSE first for a
+#     windowed process that still responds, force kill for the rest).
+# One difference is deliberate: a process that stopped responding cannot
+# process WM_CLOSE anyway, so its graceful wait is capped at 3s - waiting
+# 15s for a save dialog that will never appear only wastes the user's time.
+# ---------------------------------------------------------------------------
+function Get-KillCandidateRows {
+    param(
+        [string[]]$Names = @(),
+        [switch]$WindowedOnly
+    )
+    # Two sources, one row shape:
+    #   no names    -> processes that own a visible window ("working or
+    #                  frozen", as visible from the outside)
+    #   names given -> every process whose name matches (-ShowProcMem rules),
+    #                  windowed or not: a hung background process has no
+    #                  window, so the list alone would never offer it
+    # Both drop what the guard never touches: built-in/whitelist protected
+    # names, this script's own process chain, and the system pseudo-processes.
+    $rows = @()
+    foreach ($p in @(Get-Process -ErrorAction SilentlyContinue)) {
+        if ($p.Id -le 4) { continue }
+        if (-not $p.ProcessName) { continue }
+        if (Test-Protected $p.ProcessName) { continue }
+        if ($script:SelfChain -and $script:SelfChain.Contains([int]$p.Id)) { continue }
+        if ($Names.Count -gt 0) {
+            $hit = $false
+            foreach ($q in $Names) { if (Test-ProcNameMatch -Query $q -ProcessName $p.ProcessName) { $hit = $true; break } }
+            if (-not $hit) { continue }
+        } elseif ($WindowedOnly) {
+            $hasWindow = $false
+            try { $hasWindow = ($p.MainWindowHandle -ne [IntPtr]::Zero) } catch { }
+            if (-not $hasWindow) { continue }
+        }
+        $hung = $false
+        try { $hung = -not $p.Responding } catch { }
+        $title = ''
+        try { $title = [string]$p.MainWindowTitle } catch { }
+        $rows += [pscustomobject]@{
+            Name  = $p.ProcessName
+            Pid   = $p.Id
+            WS_MB = [int][math]::Round($p.WorkingSet64 / 1MB)
+            Title = $title
+            Hung  = $hung
+            Proc  = $p
+        }
+    }
+    # frozen first - they are the reason this feature exists - then biggest
+    return @($rows | Sort-Object @{Expression = 'Hung'; Descending = $true }, @{Expression = 'WS_MB'; Descending = $true })
+}
+
+function Show-KillList {
+    param([array]$Rows)
+    Write-Host '=== 可以强杀的进程（带窗口的；无响应的排在最前面）==='
+    Write-Host '（系统关键进程和白名单里的进程不在此列——它们本来就不该被强杀）'
+    if ($Rows.Count -eq 0) {
+        Write-Host '  当前没有符合条件的进程（也可以直接输进程名——后台卡死的进程没有窗口）。'
+        return
+    }
+    $titleWidth = Get-TitleWidth -Reserved 60
+    for ($i = 0; $i -lt $Rows.Count; $i++) {
+        $r = $Rows[$i]
+        $flag = if ($r.Hung) { '[无响应]' } else { '[      ]' }
+        $titleText = if ($r.Title) { '  ' + (Shorten-Text $r.Title $titleWidth) } else { '' }
+        Write-Host ('  {0} {1,2}. {2,-24} pid={3,-7} {4,6} MB{5}' -f $flag, ($i + 1), $r.Name, $r.Pid, $r.WS_MB, $titleText)
+    }
+    Write-Host ''
+    Write-Host '输入编号（空格分隔可多个）终止对应进程；也可以直接输进程名（如 node）终止所有匹配项；直接回车 = 取消'
+}
+
+function Select-KillTargets {
+    param(
+        [array]$Rows,
+        [string]$Selection
+    )
+    # "1 3" picks entries from the printed list; anything else is a process
+    # name (all matches). Returns the chosen rows plus notices for what was
+    # ignored or refused - kept apart from the killing code so the mapping
+    # can be tested on its own (tests/kill-proc.ps1).
+    $targets = @()
+    $notices = @()
+    $numbers = @()
+    $names = @()
+    foreach ($token in ($Selection -split '[\s,]+')) {
+        if (-not $token) { continue }
+        $n = 0
+        if ([int]::TryParse($token, [ref]$n)) { $numbers += $n } else { $names += $token }
+    }
+    foreach ($n in $numbers) {
+        if ($n -lt 1 -or $n -gt $Rows.Count) { $notices += ('  ! 编号 {0} 超范围，已忽略' -f $n); continue }
+        $targets += $Rows[$n - 1]
+    }
+    if ($names.Count -gt 0) {
+        foreach ($name in (ConvertTo-NameList -Names $names)) {
+            $matched = @(Get-KillCandidateRows -Names @($name))
+            if ($matched.Count -eq 0) {
+                # "no such process" and "it is protected" must not look alike
+                $blocked = @()
+                foreach ($p in @(Get-Process -ErrorAction SilentlyContinue)) {
+                    if ($p.ProcessName -and (Test-ProcNameMatch $name $p.ProcessName) -and (Test-Protected $p.ProcessName)) { $blocked += $p.ProcessName }
+                }
+                if ($blocked.Count -gt 0) {
+                    $notices += ('  = {0}：在保护名单里，不能杀（系统关键进程或你加过白的）' -f $name)
+                } else {
+                    $notices += ('  = {0}：没有找到匹配的进程' -f $name)
+                }
+                continue
+            }
+            $targets += $matched
+        }
+    }
+    $seenPid = New-Object 'System.Collections.Generic.HashSet[int]'
+    $unique = @()
+    foreach ($t in $targets) { if ($seenPid.Add([int]$t.Pid)) { $unique += $t } }
+    return [pscustomobject]@{ Targets = @($unique); Notices = @($notices) }
+}
+
+function Stop-ManualTarget {
+    param([pscustomobject]$Row)
+    # Same evidence trail as the guard's own kills: path + full command line,
+    # so "what did I just kill" stays answerable afterwards.
+    $proc = $Row.Proc
+    $wsMB = $Row.WS_MB
+    $path = ''
+    $cmd = ''
+    try { $path = [string]$proc.Path } catch { }
+    try {
+        $cmd = [string](Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $Row.Pid) -Property CommandLine -ErrorAction SilentlyContinue).CommandLine
+    } catch { }
+    if ($cmd.Length -gt 300) { $cmd = $cmd.Substring(0, 300) + '...' }
+    Write-Log ('MANUAL  killing {0} pid={1} ws={2}MB path={3} cmd={4}' -f $Row.Name, $Row.Pid, $wsMB, $path, $cmd)
+    $verdict = Stop-TargetProcess -Proc $proc -Emergency:$Row.Hung
+    switch ($verdict) {
+        'skipped' {
+            Write-Log ('MANUAL  skipped {0} pid={1} ws={2}MB owns a window and did not close itself - left alone (WindowedAction=Skip keeps unsaved work)' -f $Row.Name, $Row.Pid, $wsMB)
+            Write-Host ('  跳过 {0} pid={1}：有窗口且没自己关，当前策略是「有窗口不杀」' -f $Row.Name, $Row.Pid)
+        }
+        'failed' {
+            Write-Log ('MANUAL  failed to stop {0} pid={1} (access denied or still busy)' -f $Row.Name, $Row.Pid)
+            Write-Host ('  失败 {0} pid={1}：没有权限或仍在忙（提权进程需要以管理员身份运行）' -f $Row.Name, $Row.Pid)
+        }
+        default {
+            Write-Log ('MANUAL  stopped {0} pid={1} ws={2}MB' -f $Row.Name, $Row.Pid, $wsMB)
+            Write-Host ('  已终止 {0} pid={1}（{2} MB）' -f $Row.Name, $Row.Pid, $wsMB)
+        }
+    }
+    return ($verdict -eq 'stopped')
+}
+
+function Invoke-KillProc {
+    param(
+        [string]$Selection,
+        [string]$Confirm
+    )
+
+    $rows = @(Get-KillCandidateRows -WindowedOnly)
+    Show-KillList -Rows $rows
+
+    $interactive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+    if (-not $Selection -and -not $interactive) {
+        Write-Host '（当前没有可交互的控制台，也未提供 -KillProcInput，已取消）'
+        return
+    }
+    if (-not $Selection) { $Selection = [string](Read-Host '编号或进程名') }
+    if (-not $Selection.Trim()) { Write-Host '已取消，什么都没杀。'; return }
+
+    $picked = Select-KillTargets -Rows $rows -Selection $Selection
+    foreach ($note in $picked.Notices) { Write-Host $note }
+    $targets = @($picked.Targets)
+    if ($targets.Count -eq 0) { Write-Host '没有可终止的目标，已取消。'; return }
+
+    Write-Host ''
+    Write-Host ('即将终止 {0} 个进程：' -f $targets.Count)
+    foreach ($t in $targets) {
+        $flag = if ($t.Hung) { '（无响应）' } else { '' }
+        Write-Host ('  {0}  pid={1}  {2} MB{3}' -f $t.Name, $t.Pid, $t.WS_MB, $flag)
+    }
+    Write-Host '未保存的工作会丢。有窗口且仍在响应的进程会先收到关闭请求。'
+
+    # No confirmation in a non-interactive shell means no kill - the safe
+    # default, so a script can never destroy something by forgetting a flag.
+    if (-not $Confirm -and -not $interactive) {
+        Write-Host '（未提供确认，已取消——强杀必须显式确认）'
+        Write-Log 'MANUAL  aborted (no confirmation given)'
+        return
+    }
+    if (-not $Confirm) { $Confirm = [string](Read-Host '确认终止吗？输入 y 回车（其它内容 = 取消）') }
+    if (@('y', 'yes', '是') -notcontains $Confirm.Trim().ToLower()) {
+        Write-Host '已取消，什么都没杀。'
+        Write-Log 'MANUAL  aborted by user'
+        return
+    }
+
+    $before = Get-MemorySample
+    $killed = 0
+    foreach ($t in $targets) {
+        if (Stop-ManualTarget -Row $t) { $killed++ }
+    }
+    if ($killed -gt 0) {
+        Start-Sleep -Seconds 3
+        try {
+            $after = Get-MemorySample
+            Write-Host ('可用内存 {0} MB（{1}%）→ {2} MB（{3}%）[delta {4}MB]' -f $before.AvailMB, $before.AvailPct, $after.AvailMB, $after.AvailPct, ($after.AvailMB - $before.AvailMB))
+            Write-Log ('MANUAL  done ({0} stopped): avail {1}MB ({2}%) -> {3}MB ({4}%) [delta {5}MB]' -f $killed, $before.AvailMB, $before.AvailPct, $after.AvailMB, $after.AvailPct, ($after.AvailMB - $before.AvailMB))
+        } catch { }
+    } else {
+        Write-Host '没有任何进程被终止。'
+        Write-Log 'MANUAL  done (nothing stopped)'
+    }
+}
+
 function Show-Usage {
     Write-Host ''
     Write-Host 'memfuse —— 内存临界前的最后防线（在系统卡死之前，终止占用最大的那个进程）'
@@ -595,6 +928,9 @@ function Show-Usage {
     Write-Host '  -Preset aggressive   直接强杀（机器优先）'
     Write-Host ''
     Write-Host '其他常用：-ListWindowed 谁有窗口 | -ListProtected 现有名单 | -UninstallTask 卸载'
+    Write-Host '  查进程内存  : memfuse.cmd -ShowProcMem chatgpt   看指定进程占多少内存'
+    Write-Host '                 （名字大小写无所谓；支持通配符 chat*、一次多个 code,node）'
+    Write-Host '  强杀指定进程: memfuse.cmd -KillProc   列出可杀的进程，输编号或名字，确认后终止'
     Write-Host ''
 }
 
@@ -628,18 +964,20 @@ function Show-Menu {
         Write-Host '   4  查看保护名单'
         Write-Host '   5  卸载守护'
         Write-Host '   6  放进托盘（关掉这个窗口也还在，右键托盘图标可回来）'
+        Write-Host '   7  查进程内存占用（输入名字，如 chatgpt）'
+        Write-Host '   8  强杀指定进程（列出可杀的进程，输编号或名字，确认后终止）'
         Write-Host '   0  退出'
         Write-Host ''
 
         $answer = ''
         if ($queue.Count -gt 0) {
             $answer = $queue.Dequeue()
-            Write-Host ('请输入数字（0-6），回车确认： {0}' -f $answer)
+            Write-Host ('请输入数字（0-8），回车确认： {0}' -f $answer)
         } elseif ([Console]::IsInputRedirected) {
             Show-Usage
             return
         } else {
-            $answer = [string](Read-Host '请输入数字（0-6），回车确认')
+            $answer = [string](Read-Host '请输入数字（0-8），回车确认')
         }
 
         switch ($answer.Trim()) {
@@ -679,7 +1017,26 @@ function Show-Menu {
                 Write-Host '>>> 放进托盘'
                 Show-Tray
             }
-            default { Write-Host ('没看懂「{0}」—— 请输入 0 到 6 之间的数字。' -f $answer) }
+            '7' {
+                Write-Host ''
+                Write-Host '>>> 查进程内存占用（输入进程名，如 chatgpt；支持通配符 chat*，多个用逗号分隔；直接回车 = 取消）'
+                $name = ''
+                if ($queue.Count -gt 0) { $name = $queue.Dequeue(); Write-Host ('进程名： {0}' -f $name) }
+                elseif ([Console]::IsInputRedirected) { Write-Host '（当前没有可交互的控制台，已跳过）' }
+                else { $name = [string](Read-Host '进程名') }
+                if ($name.Trim()) { Show-ProcMemory -Names $name }
+                else { Write-Host '已取消，什么都没查。' }
+            }
+            '8' {
+                Write-Host ''
+                Write-Host '>>> 强杀指定进程（列表里输编号；也可以直接输进程名）'
+                $sel = ''
+                $cfm = ''
+                if ($queue.Count -gt 0) { $sel = $queue.Dequeue(); Write-Host ('选择： {0}' -f $sel) }
+                if ($queue.Count -gt 0) { $cfm = $queue.Dequeue(); Write-Host ('确认： {0}' -f $cfm) }
+                Invoke-KillProc -Selection $sel -Confirm $cfm
+            }
+            default { Write-Host ('没看懂「{0}」—— 请输入 0 到 8 之间的数字。' -f $answer) }
         }
 
         if ($queue.Count -eq 0 -and -not [Console]::IsInputRedirected) { $null = Read-Host '（按回车回到菜单）' }
@@ -1180,8 +1537,15 @@ function Show-Tray {
     try { $ni.Icon = [System.Drawing.SystemIcons]::Shield } catch { $ni.Icon = [System.Drawing.SystemIcons]::Application }
     $ni.Text = 'memfuse 内存守护'
 
+    # Double-click opens the menu - the first thing anyone tries with a tray
+    # icon, and the same action as the first context-menu entry below. Without
+    # this the icon looks broken: right-click works, double-click does nothing.
+    $ni.Add_DoubleClick({
+        try { Start-Process -FilePath (Join-Path $PSScriptRoot 'memfuse.cmd') } catch { }
+    })
+
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
-    $mi = $menu.Items.Add('打开菜单（1 演练 / 2 白名单 / 3 安装）')
+    $mi = $menu.Items.Add('打开菜单（1 演练 / 2 白名单 / 3 安装；双击图标同效）')
     $mi.add_Click({ Start-Process -FilePath (Join-Path $PSScriptRoot 'memfuse.cmd') })
     $mi = $menu.Items.Add('查看保护名单')
     $mi.add_Click({ Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-ListProtected') })
@@ -1305,6 +1669,20 @@ if ($UninstallTask) { Uninstall-GuardTask; exit 0 }
 if ($Help) { Show-Usage; exit 0 }
 if ($ListProtected) { Show-ProtectList; exit 0 }
 if ($ListWindowed) { Show-WindowedProcesses; exit 0 }
+if (@($ShowProcMem).Count -gt 0) { Show-ProcMemory -Names $ShowProcMem; exit 0 }
+# -KillProcInput "<selection>;<confirmation>" - e.g. "1;y" or "node;y".
+# Process names can never contain ';', so the split is unambiguous.
+if ($KillProc) {
+    $sel = $KillProcInput
+    $cfm = ''
+    if ($KillProcInput -and $KillProcInput -match ';') {
+        $parts = $KillProcInput -split ';', 2
+        $sel = $parts[0]
+        $cfm = $parts[1]
+    }
+    Invoke-KillProc -Selection $sel -Confirm $cfm
+    exit 0
+}
 if ($Pick) { Invoke-PickWhitelist -Answer $PickInput; exit 0 }
 if (@($AddProtect).Count -gt 0 -or @($RemoveProtect).Count -gt 0) { [void](Set-ProtectEntries -Add $AddProtect -Remove $RemoveProtect); exit 0 }
 if ($InstallTask) { Install-GuardTask; exit 0 }

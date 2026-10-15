@@ -217,9 +217,9 @@ incorrectly formatted or out of range.
 2. **双击 `memfuse.cmd`** → 出现数字菜单，按 `1` 先演练：什么都不杀，只告诉你"如果真动手，它会挑谁"；
 3. 按 `2` 保护你在乎的程序（列表里输编号：微信、编辑器、CodeBuddy…… 选谁保护谁），再按 `3` 装上守护（**它顺手在桌面放一个「memfuse 内存保险丝」快捷方式**），然后关掉窗口 —— 完成。
 
-菜单里还有 `4` 查看保护名单、`5` 卸载、`6` 放进托盘、`0` 退出。**白名单随时改**：双击桌面上那个快捷方式选 `2` 就行（也可以回来双击 `memfuse.cmd`，或 `whitelist.cmd`）。
+菜单里还有 `4` 查看保护名单、`5` 卸载、`6` 放进托盘、`7` 查进程内存占用（输个名字，如 `chatgpt`）、`8` 强杀指定进程（列表里输编号，确认后终止）、`0` 退出。**白名单随时改**：双击桌面上那个快捷方式选 `2` 就行（也可以回来双击 `memfuse.cmd`，或 `whitelist.cmd`）。
 
-**想让它常驻托盘？** 双击 `tray.cmd`（或在菜单里按 `6`）：窗口消失，通知区出现一个图标；右键它能打开菜单 / 保护名单 / 名单文件 / 今天的日志 / 工具文件夹，鼠标悬停显示实时可用内存百分比。**关掉窗口它在** —— 控制台的 X 无法被取消（Windows 一定会结束那个进程），所以实现方式是"立刻以隐藏方式把自己重新拉起"，托盘与守护都继续。
+**想让它常驻托盘？** 双击 `tray.cmd`（或在菜单里按 `6`）：窗口消失，通知区出现一个图标；**双击图标直接打开菜单**；右键它能打开菜单 / 保护名单 / 名单文件 / 今天的日志 / 工具文件夹，鼠标悬停显示实时可用内存百分比。**关掉窗口它在** —— 控制台的 X 无法被取消（Windows 一定会结束那个进程），所以实现方式是"立刻以隐藏方式把自己重新拉起"，托盘与守护都继续。
 
 > 三个细节：① `memfuse.cmd` 自带 `-ExecutionPolicy Bypass` 启动脚本，所以"新下载的脚本被 Windows 拦住"不会发生；② 安装守护不需要管理员权限；③ **快捷方式是"在你电脑上现建"的**——.lnk 里存的是绝对路径，随 zip 附带的必然是死链（指向打包者的机器），所以只能由脚本生成。卸载会一并删掉它；若你把文件夹搬了家、快捷方式失效，重新双击 `memfuse.cmd` 按 `3` 即可重建。
 
@@ -252,6 +252,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -RemoveSh
 # 4.6) 托盘模式：窗口隐藏，通知区图标常驻（关掉窗口它会重新拉起自己）
 powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Tray
 
+# 4.7) 查指定进程占多少内存（名字大小写无所谓；支持通配符 chat*、一次多个 code,node）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -ShowProcMem chatgpt
+
+# 4.8) 手动强杀指定进程：列出可杀的带窗口进程，输编号或名字，输 y 确认后终止
+powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -KillProc
+powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -KillProc -KillProcInput "1;y"   # 脚本化：选 1 号并确认
+
 # 5) 不想维护名单？用三档预设选一个策略（见下）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Preset safe -InstallTask
 ```
@@ -264,9 +271,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Preset s
 | `-Preset balanced` | 先请它自己关（`WM_CLOSE`），等不到再强杀（默认） | 大多数人的默认选择 |
 | `-Preset aggressive` | 直接强杀（`Force`） | 机器优先：卡死比丢数据更难受 |
 
-全部参数（默认值见括号）：`-WarnPercent`(12) `-CriticalPercent`(7) `-SustainSamples`(3) `-IntervalSec`(5) `-CooldownSec`(60) `-MinCandidateMB`(300) `-MaxKillsPerHour`(6) `-GracefulSeconds`(15) `-WindowedAction`(Close) `-Preset`(safe/balanced/aggressive) `-Protect node,code` `-ProtectFile .\protect-list.txt` `-AddProtect` `-RemoveProtect` `-Pick`
+全部参数（默认值见括号）：`-WarnPercent`(12) `-CriticalPercent`(7) `-SustainSamples`(3) `-IntervalSec`(5) `-CooldownSec`(60) `-MinCandidateMB`(300) `-MaxKillsPerHour`(6) `-GracefulSeconds`(15) `-WindowedAction`(Close) `-Preset`(safe/balanced/aggressive) `-Protect node,code` `-ProtectFile .\protect-list.txt` `-AddProtect` `-RemoveProtect` `-Pick` `-ShowProcMem <名字>` `-KillProc` `-KillProcInput "1;y"`
 
-【查看类】`-ListProtected`（现有名单，含"当前未运行"标注）`-ListWindowed`（谁有窗口）`-Help`（中文用法）`-Menu`（数字菜单，等同双击 `memfuse.cmd`）`-PreferIdle`（优先挑未在使用的进程，见下）`-DryRun` `-Once` `-NoSelfProtect`
+【查看类】`-ListProtected`（现有名单，含"当前未运行"标注）`-ListWindowed`（谁有窗口）`-ShowProcMem chatgpt`（查指定进程占多少内存：每个匹配进程的工作集/标题/受保护状态 + 合计与占物理内存比；支持通配符 `chat*` 与一次多个 `code,node`）`-Help`（中文用法）`-Menu`（数字菜单，等同双击 `memfuse.cmd`）`-PreferIdle`（优先挑未在使用的进程，见下）`-DryRun` `-Once` `-NoSelfProtect`
 
 【快捷方式】`-CreateShortcut`（在桌面放一个回到菜单的快捷方式；`-InstallTask` 会顺手做）`-RemoveShortcut`（删掉它）
 
@@ -327,6 +334,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\windowed-protection.
 - 想保住某个进程，写进 `protect-list.txt`（或 `-AddProtect <name>`）；代价是：它也可能正是内存临界时最大的那个占用者。
 - **在乎未保存的工作？三条路，从轻到重**：① **双击 `whitelist.cmd`**（或 `-Pick`）看清谁握着窗口，输入编号即保护；② 直接用 `-Preset safe`：有窗口的进程一律不强杀（代价是机器可能仍然很紧，几乎不用维护名单）；③ 调大 `GracefulSeconds`（默认 15 秒），给"保存 / 放弃"对话框更多时间。紧急档（可用内存 < 3.5%）只有 3 秒——那是最坏情况下的取舍，写在明处。
 - 默认只在你自己的权限范围内生效；以管理员身份运行 = 它也能杀提权进程，请自行评估。
+- **手动强杀**（`-KillProc` / 菜单第 8 项）是另一条路，别混淆：列表只含"可杀"的进程——系统关键进程与白名单进程不在列表里，手输它们的名字也会被拒绝；每次终止都必须输 `y` 确认（脚本化时确认写进 `-KillProcInput "1;y"` 的分号后面，漏写 = 不杀）。仍在响应的有窗口进程会先收到关闭请求（宽限期同守护），已卡死（无响应）或没有窗口的直接终止——卡死的进程本来也收不到关闭请求，等 15 秒只是浪费你的时间。**它不受每小时 6 次的刹车限制**：那是守护的自我保护，不是你的。每次手动终止都写进当天日志（`MANUAL` 关键词，含路径与完整命令行）。
 
 ---
 
@@ -334,6 +342,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\windowed-protection.
 
 - 设计复盘（含"守护者自身的可靠性"、策略三次反转、杀-重生循环根因）：[最后一道内存防线：内存守护脚本的设计取舍与真实战报](https://joker1point.github.io/techlog/blog/memory-guard-last-line-of-defense)
 - 姊妹项目：[portwatch](https://github.com/joker1point/portwatch)（谁占着端口）、[flowwatch](https://github.com/joker1point/flowwatch)（谁在用带宽）——同一套本地可观测性思路的三个切面。
+- 维护者交接（发版流程 / 部署状态与回滚 / 修改红线）：[docs/handoff.md](docs/handoff.md)
 
 ## License
 
