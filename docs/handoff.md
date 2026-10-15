@@ -48,4 +48,5 @@
 - **根因**：`.gitattributes` 当时只有 `*.ps1 text eol=crlf`；zip 由 Linux runner 的 `git archive` 构建，`*.cmd` 落回 `* text=auto` 的 LF。`release.yml` 里「.cmd stays a valid batch file」是错误断言（已随修复改写）。
 - **危害**：`.cmd` 遇 bare LF 会破坏 label/goto 跳转（dev-lessons E-20）。本机实测 v1.3.0 的 LF 版**侥幸能跑**（label 跳转成功）——属「这次没炸」，不是「没问题」。
 - **修复（在 main，不在 v1.3.0 标签里）**：`7170e28` = `.gitattributes` 补 `*.cmd/*.bat eol=crlf` + `release.yml` 新增「zip 验收闸门」（逐文件查 CRLF；含非 ASCII 的 `.ps1` 查 UTF-8 BOM，不过关即失败、不发布）；`864a980` = 闸门判据改精确（只有「含非 ASCII 却无 BOM」才算失效——本地预演抓到的过严条件）。
-- **未决（等拍板）**：v1.3.0 资产是否重发——**(A)** 移标签重发：`git tag -f v1.3.0 864a980 && git push -f origin v1.3.0`（push 事件触发 `release.yml`；若未触发则 `gh workflow run release.yml -f tag=v1.3.0`），闸门通过后 `gh release upload --clobber` 覆盖资产，Release 说明不动；**(B)** 保持 v1.3.0 原样，另发 v1.3.1 补丁版。下载数：截至本记录为 2，均为本次发布验收自查。
+- **处置（2026-10-15 16:38，按 A 执行）**：`git tag -f -a v1.3.0 864a980 -F <原消息>`（附注标签）+ `git push -f origin v1.3.0` → `release.yml` 重建两次均 success（run `38706964305` / `38707104918`）→ `gh release upload --clobber` 覆盖资产（`memfuse-1.3.0.zip` 61223B；Release 说明未动，仍 1269 字符）。**验收**：新资产三个 `.cmd` 全 CRLF、`.ps1` 行尾/BOM 全过关；从解包目录实跑 `memfuse.cmd -ShowProcMem explorer` 输出正常（中文/口径/保护状态都对）。
+- **踩坑备忘**：`git tag -f <tag> <commit>` 默认产出**轻量**标签——本仓库 v1.x 全是附注标签，移标签要用 `git tag -f -a`（本次先移错、已返工；返工推送多触发一次工作流，`--clobber` 幂等无副作用）。
