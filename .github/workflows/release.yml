@@ -5,8 +5,10 @@ name: Release
 # Runs automatically when a v* tag is pushed, and can also be triggered by hand
 # for an existing tag: Actions -> Release -> Run workflow -> tag.
 #
-# The zip is produced with "git archive", which honours .gitattributes, so the
-# .ps1 inside carries CRLF and the .cmd stays a valid batch file.
+# The zip is produced with "git archive", which honours .gitattributes. Both
+# the .ps1 and the .cmd launchers need an explicit "eol=crlf" rule to come out
+# of the archive with CRLF - without it they ship as pure LF, and bare LF in a
+# .cmd breaks label jumps. Proof lives in the acceptance step, not here.
 
 on:
   push:
@@ -49,6 +51,35 @@ jobs:
           ls -l "${NAME}.zip"
           echo "file=${NAME}.zip" >> "$GITHUB_OUTPUT"
           echo "the zip contains CRLF .ps1 and a CRLF .cmd (via .gitattributes)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify the archive is Windows-safe
+        run: |
+          # A .cmd with bare LF breaks label jumps, and a .ps1 without CRLF or
+          # without the UTF-8 BOM renders Chinese wrong under PowerShell 5.1.
+          # Both shipped silently wrong in v1.3.0, so the build refuses to
+          # publish an archive that would break a fresh machine.
+          python3 - <<'PY'
+          import glob, sys, zipfile
+          archives = glob.glob('*.zip')
+          if not archives:
+              print('no archive built'); sys.exit(1)
+          bad = []
+          with zipfile.ZipFile(archives[0]) as zf:
+              for name in zf.namelist():
+                  if not name.endswith(('.ps1', '.cmd', '.bat')):
+                      continue
+                  data = zf.read(name)
+                  if b'\n' in data and b'\r\n' not in data:
+                      bad.append(name + ' (bare LF)')
+                  if name.endswith('.ps1') and not data.startswith(b'\xef\xbb\xbf'):
+                      bad.append(name + ' (no UTF-8 BOM)')
+          if bad:
+              print('archive is not Windows-safe:')
+              for b in bad:
+                  print('  -', b)
+              sys.exit(1)
+          print('archive line endings + BOM: OK')
+          PY
 
       - name: Attach it to the release
         env:
