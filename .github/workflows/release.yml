@@ -54,10 +54,12 @@ jobs:
 
       - name: Verify the archive is Windows-safe
         run: |
-          # A .cmd with bare LF breaks label jumps, and a .ps1 without CRLF or
-          # without the UTF-8 BOM renders Chinese wrong under PowerShell 5.1.
-          # Both shipped silently wrong in v1.3.0, so the build refuses to
-          # publish an archive that would break a fresh machine.
+          # A .cmd with bare LF breaks label jumps. A .ps1 that contains
+          # non-ASCII text without the UTF-8 BOM is decoded as GBK by
+          # PowerShell 5.1, which mangles every Chinese string. Both shipped
+          # silently wrong in v1.3.0, so the build refuses to publish an
+          # archive that would break a fresh machine. Pure-ASCII .ps1 files
+          # need no BOM - only ones that actually carry non-ASCII text do.
           python3 - <<'PY'
           import glob, sys, zipfile
           archives = glob.glob('*.zip')
@@ -71,8 +73,8 @@ jobs:
                   data = zf.read(name)
                   if b'\n' in data and b'\r\n' not in data:
                       bad.append(name + ' (bare LF)')
-                  if name.endswith('.ps1') and not data.startswith(b'\xef\xbb\xbf'):
-                      bad.append(name + ' (no UTF-8 BOM)')
+                  if any(b > 0x7F for b in data) and not data.startswith(b'\xef\xbb\xbf'):
+                      bad.append(name + ' (non-ASCII without UTF-8 BOM)')
           if bad:
               print('archive is not Windows-safe:')
               for b in bad:
