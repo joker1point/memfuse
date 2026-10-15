@@ -92,13 +92,22 @@ Check 'status carries an availability figure' ($first.Avail -gt 0) $first.Raw
 # the "minimise to tray" part: WM_CLOSE is what the X button sends
 [void][TW]::PostMessage([IntPtr]$first.Hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
 $second = $null
-for ($i = 0; $i -lt 20 -and -not $second; $i++) {
+for ($i = 0; $i -lt 45 -and -not $second; $i++) {   # ~31s: a fresh PowerShell is slow to come up when memory is tight
     Start-Sleep -Milliseconds 700
     $s = Get-Status
     if ($s -and $s.Pid -ne $first.Pid) { $second = $s }
 }
 
-Check 'the closed process is gone' (-not [bool](Get-Process -Id $first.Pid -ErrorAction SilentlyContinue)) ('pid ' + $first.Pid + ' still here')
+# The old process dies asynchronously: Windows ends it a few seconds after
+# CTRL_CLOSE_EVENT no matter what the handler does, and on a memory-tight
+# machine (this tool exists because memory is tight) that can take much
+# longer. Sample it with a poll, not a single read.
+$gone = $false
+for ($i = 0; $i -lt 40 -and -not $gone; $i++) {
+    if (-not (Get-Process -Id $first.Pid -ErrorAction SilentlyContinue)) { $gone = $true; break }
+    Start-Sleep -Milliseconds 500
+}
+Check 'the closed process is gone' $gone ('pid ' + $first.Pid + ' still here')
 Check 'a hidden replacement took over' ([bool]$second) 'status file still shows the old pid'
 if ($second) {
     Check 'the replacement is alive' ([bool](Get-Process -Id $second.Pid -ErrorAction SilentlyContinue)) ('pid ' + $second.Pid)
