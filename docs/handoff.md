@@ -1,28 +1,32 @@
 # memfuse 维护者交接（handoff）
 
 > 分工：**README = 用户向**（定位 / 决策机制 / 快速开始 / 战报 / 局限）；**本文 = 维护者向**（发版流程 / 部署状态 / 修改红线 / 回滚）。
-> 最近更新：2026-10-09
+> 最近更新：2026-10-15
 
 ## 1. 发版流程与节奏
 
 - 仓库：`https://github.com/joker1point/memfuse`；本地 checkout `trae_projects\memfuse\`（当前在 `main`）。
-- **push 通道**（本机 hosts 钉 `github.com`、HTTPS 不稳）：`ssh://git@ssh.github.com:443/joker1point/memfuse.git`。
+- **push 通道**：2026-10-15 实测 **HTTPS 通道恢复正常**（`git fetch/push`、`gh` 全部走 `https://github.com/...` 正常，`origin` 保持 HTTPS 不动）；ssh 443 通道 `ssh://git@ssh.github.com:443/joker1point/memfuse.git` 留作备用。
 - 流程：feature 分支 PR → merge → tag `vX.Y.Z` → push tag 触发 `release.yml`。
-  - **产物由 runner 构建**（本机传不了 `uploads.github.com`）；给老 tag 补挂资产 = `POST /actions/workflows/release.yml/dispatches`。
-- **对外更新渠道 = Release 说明 + README**（2026-10-08 用户决定：v1.2.0 更新视频已出片但不发，「没必要发视频，在 github 上说了就好」——**别再催投稿**）。
-- B 站节奏（若恢复）：每攒够 3 个用户可见更新发一支更新视频。**当前批次计数 = 1/3**（自 v1.2.1 发布起算）。
+  - **产物由 runner 构建**（本机传不了 `uploads.github.com`）；给老 tag 补挂资产 = `POST /actions/workflows/release.yml/dispatches`（或 `gh workflow run release.yml -f tag=vX.Y.Z`）。
+  - 2026-10-15 起 `release.yml` 多了**一道验收闸**：构建后逐个检查 zip 内 `.ps1/.cmd/.bat` 是否 CRLF、含非 ASCII 的 `.ps1` 是否带 UTF-8 BOM，不过关直接失败不发布。
+- **发版后必须验收交付物本体**：`gh release download v1.3.0 --dir <tmp>` → 解包 → 查行尾/BOM → **从解包出来的目录里真跑一条只读命令**（`memfuse.cmd -ShowProcMem explorer`）。2026-10-15 靠这一步抓到 `.cmd` 在 zip 里是纯 LF（见 §5）。
+- **对外更新渠道 = Release 说明 + README**（2026-10-08 用户决定：v1.2.0 更新视频已出片但不发，「没必要发视频，在 github 上说了就好」——**别再催投稿**）。注意 `release.yml` 会先用占位说明（`See the assets below.`）自动建 release，**发版后要 `gh release edit <tag> --notes-file …` 换成正式说明**。
+- B 站节奏（若恢复）：每攒够 3 个用户可见更新发一支更新视频。**当前批次计数 = 2/3**（v1.3.0 = 第 2 个；自 v1.2.1 发布起算）。
 - 版本历史速览：
   - `v1.0.0`（原版，tag → `fd507f3`）
   - PR #1 merged（`c567750`：窗口宽限/白名单热加载/`memfuse.cmd`）
   - `v1.2.0`（PR #2 + #3 merged，main = `0e05c8f`：白名单小白化 / 数字菜单 / `-PreferIdle`）
   - PR #4 merged（main = `e79399a`）+ `v1.2.1`：桌面快捷方式（装守护现建、卸载删）
-  - **PR #5 open**（`feature/tray`）：托盘模式（`-Tray` / `tray.cmd` / 菜单第 6 项；`tests/tray-mode.ps1` 9/9 ✓）
+  - PR #5 merged（`a61b596`：托盘模式 + 手动干预 `-ShowProcMem` / `-KillProc` / 托盘双击开菜单 / 菜单 6-8 项）+ **`v1.3.0`**；随后两个发版修复：`7170e28`（`.gitattributes` 补 `*.cmd` CRLF + zip 验收闸门）、`864a980`（闸门判据改为「含非 ASCII 才要求 BOM」，本地预演抓到的过严条件）
 
 ## 2. 开发机生产守护状态与回滚
 
 - 已于 2026-09-27 **切到新版**：计划任务 args 指向 `trae_projects\memfuse\memory-guard.ps1`，白名单 `trae_projects\memfuse\protect-list.txt`（含 `codebuddy cn`）。
 - **回滚路径**：用原版 `frontend-works\tools\memory-guard\memory-guard.ps1`（sha `2140873372AA4A00…`，未改动）→ 跑 `-InstallTask` → 停新实例 → 拉起。
-- 2026-10-14 20:19：守护已重启加载 `-ShowProcMem` / `-KillProc` 新版（新 pid 58084，启动时间晚于脚本 mtime，日志有新 `started` 行）；同时清掉一个 10-08 遗留的旧菜单壳（否则在里面按 7/8 不识别）。**该版本尚未提交/发版**——git 工作区有未提交改动（`memory-guard.ps1`、`README.md`、两个新测试），发版前先提交。
+- 2026-10-14 20:19：守护重启加载 `-ShowProcMem` / `-KillProc` 新版（pid 58084，启动时间晚于脚本 mtime，日志有新 `started` 行）；同时清掉一个 10-08 遗留的旧菜单壳（否则在里面按 7/8 不识别）。
+- 2026-10-15：pid 58084 于 15:07–15:19 间死亡（机器未重启、uptime 23 天，死因未查明）；**15:19:10 被 5 分钟心跳（计划任务 `MemoryGuard` 重复触发）自动拉起为 pid 72460，日志有新 `started` 行**——自愈机制首次在真实故障中生效。运行中 72460 的守护代码与 main HEAD 逐字节一致（`git diff 2441397 HEAD -- memory-guard.ps1` 为空）→ 无需再次重启。
+- 2026-10-15：托盘**不在自愈范围内**（用户托盘 88868 同晚消失也没回来）——需手动双击 `tray.cmd`；当日维护会话已重新拉起（pid 29632）。
 
 ## 3. 修改红线
 
@@ -37,3 +41,11 @@
 - **演示素材在 `trae_projects\memfuse-demo\`**：`capture.ps1` + `shot-window.ps1`（真实截图工具）、`视频脚本.md`、`飞书文档.md`、`shots\`、`draft-silent.mp4`；v1.2.0 成片 `final-v12.mp4`（两幕版 45.2s）/ 三幕版备份 `final-v12-3scenes.mp4` —— 均**决定不发**（2026-10-08）；**配音需用户在 mossland 网页自行生成**（无法访问其登录态）。
 - 对外口径 =「**内存临界前的最后防线**」；**禁用「永不死机」**。
 - README 战报数字（5 天 64 次终止 / 最低 1.2% / 单次释放 9.3GB）随 README 走，更新时同步口径说明。
+
+## 5. 交付物缺陷记录：v1.3.0 的 `.cmd` 行尾（2026-10-15）
+
+- **现象**：按 §1「发版后必须验收交付物本体」下载 v1.3.0 资产解包——`memory-guard.ps1` 的 CRLF/BOM 都对，但**三个启动器 `memfuse.cmd` / `tray.cmd` / `whitelist.cmd` 在 zip 里是纯 LF**（bare LF = 32 / 18 / 28）。
+- **根因**：`.gitattributes` 当时只有 `*.ps1 text eol=crlf`；zip 由 Linux runner 的 `git archive` 构建，`*.cmd` 落回 `* text=auto` 的 LF。`release.yml` 里「.cmd stays a valid batch file」是错误断言（已随修复改写）。
+- **危害**：`.cmd` 遇 bare LF 会破坏 label/goto 跳转（dev-lessons E-20）。本机实测 v1.3.0 的 LF 版**侥幸能跑**（label 跳转成功）——属「这次没炸」，不是「没问题」。
+- **修复（在 main，不在 v1.3.0 标签里）**：`7170e28` = `.gitattributes` 补 `*.cmd/*.bat eol=crlf` + `release.yml` 新增「zip 验收闸门」（逐文件查 CRLF；含非 ASCII 的 `.ps1` 查 UTF-8 BOM，不过关即失败、不发布）；`864a980` = 闸门判据改精确（只有「含非 ASCII 却无 BOM」才算失效——本地预演抓到的过严条件）。
+- **未决（等拍板）**：v1.3.0 资产是否重发——**(A)** 移标签重发：`git tag -f v1.3.0 864a980 && git push -f origin v1.3.0`（push 事件触发 `release.yml`；若未触发则 `gh workflow run release.yml -f tag=v1.3.0`），闸门通过后 `gh release upload --clobber` 覆盖资产，Release 说明不动；**(B)** 保持 v1.3.0 原样，另发 v1.3.1 补丁版。下载数：截至本记录为 2，均为本次发布验收自查。
