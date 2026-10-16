@@ -12,7 +12,7 @@
   - 2026-10-15 起 `release.yml` 多了**一道验收闸**：构建后逐个检查 zip 内 `.ps1/.cmd/.bat` 是否 CRLF、含非 ASCII 的 `.ps1` 是否带 UTF-8 BOM，不过关直接失败不发布。
 - **发版后必须验收交付物本体**：`gh release download v1.3.0 --dir <tmp>` → 解包 → 查行尾/BOM → **从解包出来的目录里真跑一条只读命令**（`memfuse.cmd -ShowProcMem explorer`）。2026-10-15 靠这一步抓到 `.cmd` 在 zip 里是纯 LF（见 §5）。
 - **对外更新渠道 = Release 说明 + README**（2026-10-08 用户决定：v1.2.0 更新视频已出片但不发，「没必要发视频，在 github 上说了就好」——**别再催投稿**）。注意 `release.yml` 会先用占位说明（`See the assets below.`）自动建 release，**发版后要 `gh release edit <tag> --notes-file …` 换成正式说明**。
-- B 站节奏（若恢复）：每攒够 3 个用户可见更新发一支更新视频。**当前批次计数 = 3/3**（v1.4.0 = 第 3 个；自 v1.2.1 发布起算）——已满 3，但按 2026-10-08 的决定**不主动推视频**。
+- B 站节奏（若恢复）：每攒够 3 个用户可见更新发一支更新视频。**当前批次计数 = 4**（自 v1.2.1 起算：v1.2.1 / v1.3.0 / v1.4.0 / v1.4.1）——**已超阈值**，但按 2026-10-08 的决定（「没必要发视频，在 github 上说了就好」）**不主动推视频**。
 - 版本历史速览：
   - `v1.0.0`（原版，tag → `fd507f3`）
   - PR #1 merged（`c567750`：窗口宽限/白名单热加载/`memfuse.cmd`）
@@ -21,7 +21,8 @@
   - PR #5 merged（`a61b596`：托盘模式 + 手动干预 `-ShowProcMem` / `-KillProc` / 托盘双击开菜单 / 菜单 6-8 项）+ **`v1.3.0`**；随后两个发版修复：`7170e28`（`.gitattributes` 补 `*.cmd` CRLF + zip 验收闸门）、`864a980`（闸门判据改为「含非 ASCII 才要求 BOM」，本地预演抓到的过严条件）
   - **`v1.4.0`**（`ed3f732` + `47d6b37`，main = `47d6b37`）：**降级档**（不杀只让路：警告线以下把最大的非前台进程降到 `BelowNormal` + 回收工作集，内存恢复或 `-DemoteHoldSec`(600s) 后还原，`-NoDemote` 可关）/ 菜单瘦身 5 项（`0`/`6` 下架，`0` 留作隐藏退出键；2+4、3+5 合并）/ 紧急档松绑（`< 3.5%` 时 `-EmergencyCooldownSec` 3s、上限 ×3）/ **降级状态落盘**（`<LogDir>\demote-state.txt` + 启动 `Restore-StrandedDemotes` 接手还原）；配套 `tests/kill-brake.ps1`、`tests/demote.ps1`（13 项）
     - 发版执行（2026-10-16）：tag `d30670f`（附注）→ run `38876610246` **success**（验收闸门通过）→ 资产 `memfuse-1.4.0.zip` **74175B** + `gh release edit` 换正式说明（1371 字符）。**本体验收通过**：zip 内 19 个文件逐个查行尾/BOM（三个 `.cmd` 32/18/28 全 CRLF、`memory-guard.ps1` 与 `kill-proc.ps1` BOM=True、纯 ASCII 的 `.ps1` 无 BOM 正确）+ 从解包目录实跑 `memfuse.cmd -ShowProcMem explorer` 中文输出正常。开发机守护/托盘无需重启（运行中代码 = 标签内脚本，`git diff v1.4.0 HEAD -- memory-guard.ps1` 为空）。
-- **main 上已合、未发版（2026-10-16 晚）**：**前台应用全家豁免**——候选进程名 == 前台窗口所属进程名 → 跳过（不杀也不降级）。动机：浏览器 renderer 没有窗口，pid 判定救不了"正在读的那一页"（当天实测 `Tabbit Browser` renderer 16:50 被杀、16:38 被降级；用户报"正在阅读的页面总是被杀"）。实现点：`Get-Candidates` 里一处过滤（击杀 `Invoke-Relief` / 降级 `Invoke-Demote` / 演练预览三处都经它）+ 纯函数 `Remove-ForegroundApp` / `Get-ForegroundName`；配套 `tests/foreground-app.ps1`（AST 抽函数 + 接线断言）。注意：`tests/demote.ps1` 在内存高压下偶发假红（首轮 3 项失败、复跑 13/13），属时序抖动、非本次改动引入。
+  - **`v1.4.1`**（`400bd97`）：**前台应用全家豁免**——候选进程名 == 前台窗口所属进程名 → 跳过（**不杀也不降级**；切到后台即恢复为候选）。动机：浏览器 renderer 没有窗口，pid 判定救不了"正在读的那一页"（当天实测 `Tabbit Browser` renderer 16:50 被杀、16:38 被降级；用户报"正在阅读的页面总是被杀"）。实现点：`Get-Candidates` 里一处过滤（击杀 `Invoke-Relief` / 降级 `Invoke-Demote` / 演练预览三处都经它）+ 纯函数 `Remove-ForegroundApp` / `Get-ForegroundName`；配套 `tests/foreground-app.ps1`（AST 抽函数 + 接线断言）。**实测探针**：池 = 前台族 + 对照组 → 候选行只有对照组，前台族（CodeBuddy CN 族 22 进程 3916MB）缺席 ✓。注意：`tests/demote.ps1` 在内存高压下偶发假红（首轮 3 项失败、复跑 13/13），属时序抖动、非本改动引入。
+- **2026-10-16 起另有 CI**（`f51c331`）：push / PR 自动跑 `.github/workflows/ci.yml` —— 全仓 `.ps1` 语法解析 + README 素材规范（报告用，`continue-on-error`）+ 对外材料红线（硬门）；脚本在 `tools/`。本次发版前已本地预演三项 ✓（语法过、红线 PASS、素材规范 FAIL 但非硬门）。**维护者注意**：`ci.yml` 与 `tools/` 由另一条工作线在改（本次发版时工作区仍留着它们的未提交改动）——提交只 `git add` 自己的路径，别顺手带上。
 
 ## 2. 开发机生产守护状态与回滚
 
