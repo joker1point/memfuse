@@ -231,7 +231,7 @@ incorrectly formatted or out of range.
 
 菜单里还有 `2` 保护名单（看 / 加 / 删：列表里输编号，没在运行的条目会标出来）、`3` 守护开关（已安装 → 卸载；未安装 → 安装）、`4` 查进程内存占用（输个名字，如 `chatgpt`）、`5` 强杀指定进程（列表里输编号，确认后终止）；**退出 = 直接关闭窗口**。**白名单随时改**：双击桌面上那个快捷方式选 `2` 就行（也可以回来双击 `memfuse.cmd`，或 `whitelist.cmd`）。
 
-**想让它常驻托盘？** 双击 `tray.cmd`：窗口消失，通知区出现一个图标；**双击图标直接打开菜单**；右键它能打开菜单 / 保护名单 / 名单文件 / 今天的日志 / 工具文件夹，鼠标悬停显示实时可用内存百分比。**关掉窗口它在** —— 控制台的 X 无法被取消（Windows 一定会结束那个进程），所以实现方式是"立刻以隐藏方式把自己重新拉起"，托盘与守护都继续。
+**想让它常驻托盘？** 双击 `tray.cmd`：窗口消失，通知区出现一个图标；**双击图标直接打开菜单**；右键它能打开菜单 / 保护名单 / 名单文件 / 今天的日志 / 工具文件夹 —— **后三项都在命令行窗口里打开、窗口停在那儿不自动关**（可以滚动、可以复制，也能直接接着敲 `-AddProtect` / `-RemoveProtect` 改名单）；鼠标悬停显示实时可用内存百分比。**关掉窗口它在** —— 控制台的 X 无法被取消（Windows 一定会结束那个进程），所以实现方式是"立刻以隐藏方式把自己重新拉起"，托盘与守护都继续。
 
 > 三个细节：① `memfuse.cmd` 自带 `-ExecutionPolicy Bypass` 启动脚本，所以"新下载的脚本被 Windows 拦住"不会发生；② 安装守护不需要管理员权限；③ **快捷方式是"在你电脑上现建"的**——.lnk 里存的是绝对路径，随 zip 附带的必然是死链（指向打包者的机器），所以只能由脚本生成。卸载会一并删掉它；若你把文件夹搬了家、快捷方式失效，重新双击 `memfuse.cmd` 按 `3` 即可重建。
 
@@ -271,6 +271,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -ShowProc
 powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -KillProc
 powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -KillProc -KillProcInput "1;y"   # 脚本化：选 1 号并确认
 
+# 4.9) 看日志 / 看名单文件（托盘右键的「看今天的日志 / 编辑名单文件」就是这两条，只是额外套了个不会自动关的窗口）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -ShowLog            # 今天日志的最新 60 行（-LogTail 20 可改行数）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -ShowProtectFile    # 名单文件：路径 + 带行号的内容 + 三种改法
+
 # 5) 不想维护名单？用三档预设选一个策略（见下）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Preset safe -InstallTask
 ```
@@ -283,13 +287,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Preset s
 | `-Preset balanced` | 先请它自己关（`WM_CLOSE`），等不到再强杀（默认） | 大多数人的默认选择 |
 | `-Preset aggressive` | 直接强杀（`Force`） | 机器优先：卡死比丢数据更难受 |
 
-全部参数（默认值见括号）：`-WarnPercent`(12) `-CriticalPercent`(7) `-SustainSamples`(3) `-IntervalSec`(5) `-CooldownSec`(60) `-EmergencyCooldownSec`(3) `-MinCandidateMB`(300) `-MaxKillsPerHour`(6) `-NoDemote` `-DemoteCooldownSec`(120) `-DemoteHoldSec`(600) `-GracefulSeconds`(15) `-WindowedAction`(Close) `-Preset`(safe/balanced/aggressive) `-Protect node,code` `-ProtectFile .\protect-list.txt` `-AddProtect` `-RemoveProtect` `-Pick` `-ShowProcMem <名字>` `-KillProc` `-KillProcInput "1;y"`
+全部参数（默认值见括号）：`-WarnPercent`(12) `-CriticalPercent`(7) `-SustainSamples`(3) `-IntervalSec`(5) `-CooldownSec`(60) `-EmergencyCooldownSec`(3) `-MinCandidateMB`(300) `-MaxKillsPerHour`(6) `-NoDemote` `-DemoteCooldownSec`(120) `-DemoteHoldSec`(600) `-GracefulSeconds`(15) `-WindowedAction`(Close) `-Preset`(safe/balanced/aggressive) `-Protect node,code` `-ProtectFile .\protect-list.txt` `-AddProtect` `-RemoveProtect` `-Pick` `-ShowProcMem <名字>` `-KillProc` `-KillProcInput "1;y"` `-ShowProtectFile` `-ShowLog` `-LogTail`(60)
 
-【查看类】`-ListProtected`（现有名单，含"当前未运行"标注）`-ListWindowed`（谁有窗口）`-ShowProcMem chatgpt`（查指定进程占多少内存：每个匹配进程的工作集/标题/受保护状态 + 合计与占物理内存比；支持通配符 `chat*` 与一次多个 `code,node`）`-Help`（中文用法）`-Menu`（数字菜单，等同双击 `memfuse.cmd`）`-PreferIdle`（优先挑未在使用的进程，见下）`-DryRun` `-Once` `-NoSelfProtect`
+【查看类】`-ListProtected`（现有名单，含"当前未运行"标注）`-ShowProtectFile`（名单文件的路径、带行号的内容与三种改法）`-ShowLog`（今天日志的最新 N 行，`-LogTail` 改行数）`-ListWindowed`（谁有窗口）`-ShowProcMem chatgpt`（查指定进程占多少内存：每个匹配进程的工作集/标题/受保护状态 + 合计与占物理内存比；支持通配符 `chat*` 与一次多个 `code,node`）`-Help`（中文用法）`-Menu`（数字菜单，等同双击 `memfuse.cmd`）`-PreferIdle`（优先挑未在使用的进程，见下）`-DryRun` `-Once` `-NoSelfProtect`
 
 【快捷方式】`-CreateShortcut`（在桌面放一个回到菜单的快捷方式；`-InstallTask` 会顺手做）`-RemoveShortcut`（删掉它）
 
-【托盘】`-Tray`（窗口隐藏 + 通知区图标：右键打开菜单/名单/日志，悬停看实时可用内存；关掉窗口也不丢，会以隐藏方式把自己重新拉起）
+【托盘】`-Tray`（窗口隐藏 + 通知区图标：右键打开菜单 / 保护名单 / 名单文件 / 今天的日志 / 工具文件夹 —— **后三项是命令行窗口、停住不自动关**；悬停看实时可用内存；关掉窗口也不丢，会以隐藏方式把自己重新拉起）
 
 【白名单的三种改法】① 双击 `whitelist.cmd`（推荐，选编号）；② `-Pick`（同上的命令行版）；③ 直接编辑 `protect-list.txt`（每行一个进程名）。**三种都立即生效，不用重启守护**；写错名字会有明确提示，不会静默失效。
 

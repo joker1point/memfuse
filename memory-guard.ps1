@@ -138,7 +138,21 @@
 
 .PARAMETER ListProtected
     Print the effective protection list (built-in system processes + -Protect
-    arguments + protect-list.txt) and exit.
+    arguments + protect-list.txt) and exit. The tray's "查看保护名单" entry runs
+    this in a console window.
+
+.PARAMETER ShowProtectFile
+    Print protect-list.txt itself - its path, its numbered content and the three
+    supported ways to change it - and exit. The tray's "编辑名单文件" entry runs
+    this in a console window (launched with -NoExit, so its prompt stays).
+    Toggle a single name with -AddProtect / -RemoveProtect.
+
+.PARAMETER ShowLog
+    Print the tail of today's log (how many lines: -LogTail) and exit. The
+    tray's "看今天的日志" entry runs this in a console window.
+
+.PARAMETER LogTail
+    How many lines -ShowLog prints. Default 60.
 
 .PARAMETER ListWindowed
     List the processes that currently own a visible window - the ones that may
@@ -300,6 +314,9 @@ param(
     [string[]]$RemoveProtect = @(),
     [switch]$ListProtected,
     [switch]$ListWindowed,
+    [switch]$ShowProtectFile,
+    [switch]$ShowLog,
+    [ValidateRange(1, 10000)][int]$LogTail = 60,
     [string[]]$ShowProcMem = @(),
     [switch]$KillProc,
     [string]$KillProcInput,
@@ -514,6 +531,52 @@ function Show-ProtectList {
         }
     }
     Write-Host '================================================='
+}
+
+function Show-ProtectFile {
+    # The raw whitelist file the way a console can show it: what is in it, where
+    # it is, and the three supported ways to change it. The tray's "编辑名单文件"
+    # entry runs this in a console launched with -NoExit, so the prompt stays and
+    # the -AddProtect / -RemoveProtect lines below can be pasted straight in.
+    try { $Host.UI.RawUI.WindowTitle = 'memfuse · 保护名单文件' } catch { }
+    Write-Host ''
+    Write-Host ('名单文件：{0}' -f $ProtectFile)
+    if (-not (Test-Path -LiteralPath $ProtectFile)) {
+        Write-Host '（还没有这个文件——加第一条保护项时会自动创建）'
+    } else {
+        $lines = @(Get-Content -LiteralPath $ProtectFile -Encoding UTF8)
+        Write-Host ('共 {0} 行（# 开头是注释，其余每行一个进程名）：' -f $lines.Count)
+        $n = 0
+        foreach ($line in $lines) { $n++; Write-Host ('  {0,3}  {1}' -f $n, $line) }
+    }
+    Write-Host ''
+    Write-Host '改它的三种方式（守护每 5 秒重读文件，改完即时生效、不用重启）：'
+    Write-Host '  1) 加一项 : memfuse.cmd -AddProtect "进程名"      （多个用逗号分隔）'
+    Write-Host '  2) 去一项 : memfuse.cmd -RemoveProtect "进程名"'
+    Write-Host '  3) 直接编辑上面那个文件（一行一个名字）'
+    Write-Host '  更省事的选择界面：双击 whitelist.cmd（列出有窗口的程序，输编号即可）'
+    Write-Host ''
+}
+
+function Show-TodayLog {
+    # Today's log, tailed: enough to see what the guard just did, without opening
+    # an editor on a file that grows all day. -LogTail controls how many lines.
+    param([int]$Tail = 60)
+    try { $Host.UI.RawUI.WindowTitle = 'memfuse · 今天的日志' } catch { }
+    Write-Host ''
+    Write-Host ('日志文件：{0}' -f $LogFile)
+    if (-not (Test-Path -LiteralPath $LogFile)) {
+        Write-Host '（今天还没有日志——守护还没跑过？装上它：memfuse.cmd → 按 3）'
+        return
+    }
+    $lines = @(Get-Content -LiteralPath $LogFile -Encoding UTF8)
+    $n = [math]::Min($Tail, $lines.Count)
+    Write-Host ('共 {0} 行，下面是最新 {1} 行：' -f $lines.Count, $n)
+    Write-Host ''
+    if ($n -gt 0) { foreach ($line in $lines[($lines.Count - $n)..($lines.Count - 1)]) { Write-Host $line } }
+    Write-Host ''
+    Write-Host ('实时跟踪（Ctrl+C 停）：Get-Content -LiteralPath "{0}" -Wait -Tail 20' -f $LogFile)
+    Write-Host ''
 }
 
 function ConvertTo-NameList {
@@ -1632,12 +1695,16 @@ function Show-Tray {
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
     $mi = $menu.Items.Add('打开菜单（1 演练 / 2 保护名单 / 3 守护开关；双击图标同效）')
     $mi.add_Click({ Start-Process -FilePath (Join-Path $PSScriptRoot 'memfuse.cmd') })
+    # The three "look at something" entries all open a *console*, not an editor:
+    # the same view the command line gives, nothing to install, and -NoExit keeps
+    # the window (and its prompt) around. The old spelling started a bare
+    # powershell that printed and vanished - which read as "the entry is broken".
     $mi = $menu.Items.Add('查看保护名单')
-    $mi.add_Click({ Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-ListProtected') })
+    $mi.add_Click({ Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoLogo', '-NoExit', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-ListProtected') })
     $mi = $menu.Items.Add('编辑名单文件 protect-list.txt')
-    $mi.add_Click({ Start-Process -FilePath 'notepad.exe' -ArgumentList (Join-Path $PSScriptRoot 'protect-list.txt') })
+    $mi.add_Click({ Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoLogo', '-NoExit', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-ShowProtectFile') })
     $mi = $menu.Items.Add('看今天的日志')
-    $mi.add_Click({ Start-Process -FilePath 'notepad.exe' -ArgumentList $LogFile })
+    $mi.add_Click({ Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoLogo', '-NoExit', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-ShowLog') })
     $mi = $menu.Items.Add('打开工具所在文件夹')
     $mi.add_Click({ Start-Process -FilePath 'explorer.exe' -ArgumentList $PSScriptRoot })
     $mi = $menu.Items.Add('退出托盘（守护若在跑则不受影响）')
@@ -1893,6 +1960,8 @@ if ($UninstallTask) { Uninstall-GuardTask; exit 0 }
 if ($Help) { Show-Usage; exit 0 }
 if ($ListProtected) { Show-ProtectList; exit 0 }
 if ($ListWindowed) { Show-WindowedProcesses; exit 0 }
+if ($ShowProtectFile) { Show-ProtectFile; exit 0 }
+if ($ShowLog) { Show-TodayLog -Tail $LogTail; exit 0 }
 if (@($ShowProcMem).Count -gt 0) { Show-ProcMemory -Names $ShowProcMem; exit 0 }
 # -KillProcInput "<selection>;<confirmation>" - e.g. "1;y" or "node;y".
 # Process names can never contain ';', so the split is unambiguous.
