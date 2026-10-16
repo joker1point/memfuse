@@ -1196,6 +1196,35 @@ function Get-ForegroundPid {
     }
 }
 
+function Get-ForegroundName {
+    # Process name of the window you are working in right now. Everything that
+    # carries this name is out of reach while it is in the foreground - see
+    # Remove-ForegroundApp.
+    $fgPid = Get-ForegroundPid
+    if ($fgPid -eq 0) { return '' }
+    try {
+        $p = Get-Process -Id $fgPid -ErrorAction SilentlyContinue
+        if ($p) { return [string]$p.ProcessName }
+    } catch { }
+    return ''
+}
+
+function Remove-ForegroundApp {
+    # Drop every candidate belonging to the app you are looking at right now.
+    #
+    # Checking the pid is not enough: a browser owns its window in the main
+    # process, while the page you are reading lives in a *child* process with
+    # the same name. A pid-only rule happily kills the very tab you have open
+    # (2026-10-16: the guard shot a Tabbit renderer twice in one afternoon), so
+    # the whole same-named family is skipped instead. The kill path, the demote
+    # tier and the dry-run preview all enumerate through Get-Candidates, so this
+    # is the one place to enforce it. Nothing is shielded permanently: once the
+    # window goes to the background, the app is a candidate again.
+    param([array]$List, [string]$ForegroundName)
+    if (-not $ForegroundName) { return $List }
+    return @($List | Where-Object { $_.ProcessName -ne $ForegroundName })
+}
+
 function Update-CpuSnapshot {
     # One dictionary per sampling tick; the difference between two ticks is what
     # tells whether a process was actually doing work.
@@ -1245,6 +1274,9 @@ function Get-Candidates {
         (-not (Test-Protected $_.ProcessName)) -and
         (-not $script:SelfChain.Contains($_.Id))
     })
+    # Whatever app owns the foreground window right now (whole name family) is
+    # not a candidate at all - neither for a kill nor for a demotion.
+    $list = @(Remove-ForegroundApp -List $list -ForegroundName (Get-ForegroundName))
     if (-not $PreferIdle) {
         return @($list | Sort-Object WorkingSet64 -Descending | Select-Object -First $TopN)
     }
