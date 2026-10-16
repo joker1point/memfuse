@@ -10,6 +10,11 @@ on:
     branches: [main]
   pull_request:
 
+# Windows runner 默认 stdout 不是 UTF-8；校验脚本会打印中文，不设会 UnicodeEncodeError
+# （2026-10-16 首跑实测；脚本侧也加了 reconfigure 兜底，这里按项目既有约定再设一道）。
+env:
+  PYTHONIOENCODING: utf-8
+
 jobs:
   checks:
     name: "语法 · 素材规范 · 红线"
