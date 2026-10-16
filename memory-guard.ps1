@@ -41,7 +41,14 @@
         and the next candidate is tried.
       * Processes smaller than MinCandidateMB are ignored - killing them would
         not help and would only hurt the user.
-      * Cooldown between kills + MaxKillsPerHour hard limit.
+      * Cooldown between kills + MaxKillsPerHour hard limit. The emergency
+        tier (below half the critical line) relaxes both: 3 s cooldown and
+        3x the hourly budget, so a machine that is about to hard-freeze is
+        not left waiting for the hour to roll.
+      * While memory is only in the warn band the guard degrades instead of
+        killing: the largest process it is not using goes BelowNormal and its
+        working set is trimmed; the priority comes back when memory recovers
+        or DemoteHoldSec elapsed (-NoDemote disables that tier).
       * -DryRun logs what it WOULD kill without killing anything.
 
     Logs: <script dir>\logs\memory-guard-YYYYMMDD.log
@@ -61,13 +68,34 @@
     Sampling interval in seconds. Default 5.
 
 .PARAMETER CooldownSec
-    Minimum seconds between two kills. Default 60.
+    Minimum seconds between two kills (normal tier). Default 60.
+
+.PARAMETER EmergencyCooldownSec
+    Cooldown used in the emergency tier (available memory below half the
+    critical line, i.e. < 3.5% by default). Default 3 - with the 5 s sampling
+    interval that means "no extra wait". The hourly kill cap is also tripled
+    in this tier (MaxKillsPerHour * 3).
 
 .PARAMETER MinCandidateMB
     Never kill a process using less than this many MB. Default 300.
 
 .PARAMETER MaxKillsPerHour
-    Hard limit on kills per rolling hour. Default 6.
+    Hard limit on kills per rolling hour (normal tier). Default 6; the
+    emergency tier allows up to three times this.
+
+.PARAMETER NoDemote
+    Disable the degrade tier. By default, while memory is only in the warn band
+    (below WarnPercent, above the critical line) the guard demotes the largest
+    process it is not using right now to BelowNormal and trims its working set
+    instead of killing anything. -NoDemote restores the old kill-only
+    behaviour.
+
+.PARAMETER DemoteCooldownSec
+    Minimum seconds between two demotions. Default 120.
+
+.PARAMETER DemoteHoldSec
+    How long a demoted process keeps the lowered priority at most (default
+    600 s). The priority is also restored as soon as memory recovers.
 
 .PARAMETER GracefulSeconds
     How long to wait for a windowed process to close itself (WM_CLOSE) before
@@ -89,14 +117,16 @@
     Show the numbered menu and exit. This is what double-clicking memfuse.cmd
     does, so a first-time user can do the whole setup (dry run -> whitelist ->
     install) by pressing numbers instead of typing commands:
-      1 dry run   2 whitelist picker   3 install   4 show list   5 uninstall
-      0 quit
+      1 dry run   2 protect list   3 guard toggle   4 process memory   5 kill
+    Closing the window quits (0 stays accepted as an unlisted exit key). The
+    tray entry is not on the menu - it lives in tray.cmd.
     In a non-interactive shell (no console attached) it prints the usage text
     instead of waiting for input, so nothing can hang.
 
 .PARAMETER MenuInput
     Scripted answers for -Menu, e.g. "2,1,0" (menu choice 2, picker answer 1,
-    then quit). Exists so the test suite can drive the menu without a console.
+    then quit through the unlisted 0 key). Exists so the test suite can drive
+    the menu without a console.
 
 .PARAMETER AddProtect
     Add process names to protect-list.txt and exit. Idempotent, de-duplicated,
@@ -169,7 +199,8 @@
     Write <Desktop>\memory-guard-alert.txt on every action. Default $true.
 
 .PARAMETER DryRun
-    Log decisions but never kill anything.
+    Log decisions but never kill anything. Would-kills still consume the
+    hourly brake (cooldown and cap), so the preview stays faithful.
 
 .PARAMETER Once
     Sample once, print the verdict and exit. Combine with -DryRun to preview
@@ -245,8 +276,12 @@ param(
     [ValidateRange(1, 120)][int]$SustainSamples = 3,
     [ValidateRange(1, 3600)][int]$IntervalSec = 5,
     [ValidateRange(0, 86400)][int]$CooldownSec = 60,
+    [ValidateRange(0, 3600)][int]$EmergencyCooldownSec = 3,
     [ValidateRange(1, 1048576)][int]$MinCandidateMB = 300,
     [ValidateRange(1, 1000)][int]$MaxKillsPerHour = 6,
+    [switch]$NoDemote,
+    [ValidateRange(0, 86400)][int]$DemoteCooldownSec = 120,
+    [ValidateRange(0, 86400)][int]$DemoteHoldSec = 600,
     [ValidateRange(0, 300)][int]$GracefulSeconds = 15,
     [ValidateSet('Close', 'Skip', 'Force')][string]$WindowedAction = 'Close',
     [ValidateRange(1, 20)][int]$MaxAttemptsPerRound = 5,
@@ -941,6 +976,8 @@ function Show-Menu {
     param([string]$Scripted)
 
     # -MenuInput "2,1,0" = menu choice 2, let the picker answer 1, then quit.
+    # 0 is no longer listed on the menu (closing the window quits), but it stays
+    # a valid answer so scripted runs keep working.
     # Without a console the menu prints the usage text instead of waiting for
     # input, so nothing can ever hang in an automated context.
     $queue = New-Object 'System.Collections.Generic.Queue[string]'
@@ -959,25 +996,23 @@ function Show-Menu {
         Write-Host '  现在什么都没启动 —— 下面的动作都是你自己按出来的。'
         Write-Host ''
         Write-Host '   1  先演练一次（什么都不杀，只看它想杀谁）'
-        Write-Host '   2  保护我在乎的程序（打开选择界面，输编号）'
-        Write-Host '   3  装上守护（登录自动生效 + 每 5 分钟自愈，不需要管理员）'
-        Write-Host '   4  查看保护名单'
-        Write-Host '   5  卸载守护'
-        Write-Host '   6  放进托盘（关掉这个窗口也还在，右键托盘图标可回来）'
-        Write-Host '   7  查进程内存占用（输入名字，如 chatgpt）'
-        Write-Host '   8  强杀指定进程（列出可杀的进程，输编号或名字，确认后终止）'
-        Write-Host '   0  退出'
+        Write-Host '   2  保护名单（看 / 加 / 删：列表里输编号，含"没在运行"检查）'
+        Write-Host '   3  守护开关（已安装 → 卸载；未安装 → 安装）'
+        Write-Host '   4  查进程内存占用（输入名字，如 chatgpt）'
+        Write-Host '   5  强杀指定进程（列出可杀的进程，输编号或名字，确认后终止）'
+        Write-Host ''
+        Write-Host '  退出：直接关闭窗口（想让图标常驻通知区：双击 tray.cmd）'
         Write-Host ''
 
         $answer = ''
         if ($queue.Count -gt 0) {
             $answer = $queue.Dequeue()
-            Write-Host ('请输入数字（0-8），回车确认： {0}' -f $answer)
+            Write-Host ('请输入数字（1-5），回车确认： {0}' -f $answer)
         } elseif ([Console]::IsInputRedirected) {
             Show-Usage
             return
         } else {
-            $answer = [string](Read-Host '请输入数字（0-8），回车确认')
+            $answer = [string](Read-Host '请输入数字（1-5），回车确认')
         }
 
         switch ($answer.Trim()) {
@@ -991,33 +1026,29 @@ function Show-Menu {
             }
             '2' {
                 Write-Host ''
-                Write-Host '>>> 白名单：列表里选谁就保护谁（对同一个编号再选一次 = 取消保护）'
+                Write-Host '>>> 保护名单：列表里选谁就保护谁（对同一个编号再选一次 = 取消保护）'
                 if ($queue.Count -gt 0) { Invoke-PickWhitelist -Answer $queue.Dequeue() }
                 elseif ([Console]::IsInputRedirected) { Write-Host '（当前没有可交互的控制台，已跳过）' }
                 else { Invoke-PickWhitelist }
             }
             '3' {
                 Write-Host ''
-                Write-Host '>>> 安装守护'
-                Install-GuardTask
-                Write-Host '>>> 装好了。现在可以关掉这个窗口 —— 之后它自己会跑。'
-                Write-Host '    以后改白名单：双击桌面上那个「memfuse 内存保险丝」快捷方式，按 2 就行。'
+                if ($task) {
+                    Write-Host '>>> 守护开关：当前已安装 → 卸载'
+                    $yes = ''
+                    if ($queue.Count -gt 0) { $yes = $queue.Dequeue() }
+                    elseif ([Console]::IsInputRedirected) { Write-Host '（当前没有可交互的控制台，已跳过卸载）'; continue }
+                    else { $yes = [string](Read-Host '确定卸载吗？输入 y 回车（其它内容 = 取消）') }
+                    if (@('y', 'yes', '是') -contains $yes.Trim().ToLower()) { Write-Host ''; Uninstall-GuardTask }
+                    else { Write-Host '已取消，什么都没变。' }
+                } else {
+                    Write-Host '>>> 守护开关：当前未安装 → 安装'
+                    Install-GuardTask
+                    Write-Host '>>> 装好了。现在可以关掉这个窗口 —— 之后它自己会跑。'
+                    Write-Host '    以后改白名单：双击桌面上那个「memfuse 内存保险丝」快捷方式，按 2 就行。'
+                }
             }
-            '4' { Write-Host ''; Show-ProtectList }
-            '5' {
-                $yes = ''
-                if ($queue.Count -gt 0) { $yes = $queue.Dequeue() }
-                elseif ([Console]::IsInputRedirected) { Write-Host '（当前没有可交互的控制台，已跳过卸载）'; continue }
-                else { $yes = [string](Read-Host '确定卸载吗？输入 y 回车（其它内容 = 取消）') }
-                if (@('y', 'yes', '是') -contains $yes.Trim().ToLower()) { Write-Host ''; Uninstall-GuardTask }
-                else { Write-Host '已取消，什么都没变。' }
-            }
-            '6' {
-                Write-Host ''
-                Write-Host '>>> 放进托盘'
-                Show-Tray
-            }
-            '7' {
+            '4' {
                 Write-Host ''
                 Write-Host '>>> 查进程内存占用（输入进程名，如 chatgpt；支持通配符 chat*，多个用逗号分隔；直接回车 = 取消）'
                 $name = ''
@@ -1027,7 +1058,7 @@ function Show-Menu {
                 if ($name.Trim()) { Show-ProcMemory -Names $name }
                 else { Write-Host '已取消，什么都没查。' }
             }
-            '8' {
+            '5' {
                 Write-Host ''
                 Write-Host '>>> 强杀指定进程（列表里输编号；也可以直接输进程名）'
                 $sel = ''
@@ -1036,7 +1067,7 @@ function Show-Menu {
                 if ($queue.Count -gt 0) { $cfm = $queue.Dequeue(); Write-Host ('确认： {0}' -f $cfm) }
                 Invoke-KillProc -Selection $sel -Confirm $cfm
             }
-            default { Write-Host ('没看懂「{0}」—— 请输入 0 到 8 之间的数字。' -f $answer) }
+            default { Write-Host ('没看懂「{0}」—— 请输入 1 到 5 之间的数字（退出：直接关闭窗口）。' -f $answer) }
         }
 
         if ($queue.Count -eq 0 -and -not [Console]::IsInputRedirected) { $null = Read-Host '（按回车回到菜单）' }
@@ -1051,8 +1082,18 @@ function Invoke-PickWhitelist {
     # picking one can only produce a confusing "cannot change that" answer.
     $rows = @(Get-WindowedRows | Where-Object { -not $protectSet.Contains((ConvertTo-ProcKey $_.Name)) })
     Write-Host ''
-    Write-Host '=== memfuse 白名单：选择要保护的程序（被保护的永不被终止）==='
-    Write-Host '（系统内置保护的进程不在此列——它们本来就杀不得）'
+    Write-Host '=== memfuse 保护名单：列表里选谁就保护谁（被保护的永不被终止）==='
+    Write-Host ('（系统内置 {0} 项不在此列——它们本来就杀不得）' -f $SystemProtected.Count)
+    $runningNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($p in @(Get-Process -ErrorAction SilentlyContinue)) { [void]$runningNames.Add((ConvertTo-ProcKey $p.ProcessName)) }
+    if ($script:fileProtect.Count -gt 0) {
+        $names = @($script:fileProtect | Sort-Object)
+        $idle = @($names | Where-Object { -not $runningNames.Contains($_) })
+        $suffix = if ($idle.Count -gt 0) { ('；当前没在运行：{0}（拼错了？还是只是没打开？）' -f ($idle -join '、')) } else { '；当前都在运行' }
+        Write-Host ('名单文件 {0} 项：{1}{2}' -f $names.Count, ($names -join '、'), $suffix)
+    } else {
+        Write-Host '名单文件还是空的——下面列表里选编号就能加。'
+    }
     $recent = Get-RecentKillName
     if ($recent) { Write-Host ('上次被守护终止的是：{0}（如果这是你在用的，建议保护它）' -f $recent) }
     Write-Host ''
@@ -1325,7 +1366,10 @@ log: {4}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $AvailMB, $AvailPct, $Min
         if ($DryRun) {
             $note = if ($windowed) { ' [has a window -> WindowedAction=' + $WindowedAction + ']' } else { '' }
             Write-Log ('DRY-RUN would kill {0} pid={1} ws={2}MB path={3} cmd={4}{5}{6}' -f $procName, $proc.Id, $wsMB, $path, $cmd, $note, $why)
-            return $false
+            # Count the would-kill against the hourly brake exactly like a real
+            # kill would: a preview that never consumes the budget would lie
+            # about how many times the guard is still willing to act.
+            return $true
         }
 
         Write-Log ('ACTION  killing {0} pid={1} ws={2}MB path={3} cmd={4}{5}' -f $procName, $proc.Id, $wsMB, $path, $cmd, $why)
@@ -1387,6 +1431,12 @@ function Show-Config {
     Write-Host ('阈值        : 警告 < {0}%  临界 < {1}%  连续 {2} 次 × {3}s（紧急 < {4}%）' -f `
         $WarnPercent, $CriticalPercent, $SustainSamples, $IntervalSec, [math]::Round($CriticalPercent / 2.0, 1))
     Write-Host ('刹车        : 冷却 {0}s，每小时最多 {1} 次，候选不小于 {2} MB' -f $CooldownSec, $MaxKillsPerHour, $MinCandidateMB)
+    Write-Host ('紧急档      : 可用 < {0}% 时冷却压到 {1}s、上限放宽到 {2}/h（要堵死时优先救回来）' -f [math]::Round($CriticalPercent / 2.0, 1), $EmergencyCooldownSec, ($MaxKillsPerHour * 3))
+    if ($NoDemote) {
+        Write-Host '降级档      : 已关闭（-NoDemote）'
+    } else {
+        Write-Host ('降级档      : 可用 < {0}% 时把最大的非前台进程降到 BelowNormal + 回收工作集（不杀；内存恢复或 {1}s 后还原）' -f $WarnPercent, $DemoteHoldSec)
+    }
     Write-Host ('受保护      : 共 {0} 项（系统内置 {1} + 用户白名单 {2}）' -f ($protectSet.Count + $script:fileProtect.Count), $SystemProtected.Count, (($protectSet.Count - $SystemProtected.Count) + $script:fileProtect.Count))
     Write-Host ('有窗口的进程: {0}（宽限期 {1}s，紧急档 {2}s）' -f $WindowedAction, [math]::Max($GracefulSeconds, 1), [math]::Min([math]::Max($GracefulSeconds, 1), 3))
     Write-Host ('选择策略    : {0}' -f ($(if ($PreferIdle) { '优先挑未在使用（体积 × 使用信号折扣）' } else { '谁大挑谁（默认）' })))
@@ -1545,7 +1595,7 @@ function Show-Tray {
     })
 
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
-    $mi = $menu.Items.Add('打开菜单（1 演练 / 2 白名单 / 3 安装；双击图标同效）')
+    $mi = $menu.Items.Add('打开菜单（1 演练 / 2 保护名单 / 3 守护开关；双击图标同效）')
     $mi.add_Click({ Start-Process -FilePath (Join-Path $PSScriptRoot 'memfuse.cmd') })
     $mi = $menu.Items.Add('查看保护名单')
     $mi.add_Click({ Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-ListProtected') })
@@ -1661,6 +1711,87 @@ function Uninstall-GuardTask {
 }
 
 # ---------------------------------------------------------------------------
+# degrade tier: demote + trim instead of killing while memory is only "warn"
+#
+# Killing is the last resort. Between the warn line and the critical line the
+# guard now does something reversible instead: the largest process it is NOT
+# using right now loses its priority (BelowNormal) and gives its pages back
+# (EmptyWorkingSet -> standby list). The priority is restored as soon as memory
+# recovers or DemoteHoldSec elapsed; the pages come back on demand by
+# themselves. Nothing is terminated here.
+# ---------------------------------------------------------------------------
+if (-not ('MemGuard.Mem' -as [type])) {
+    Add-Type -Namespace MemGuard -Name Mem -MemberDefinition @'
+[DllImport("psapi.dll", SetLastError = true)] public static extern bool EmptyWorkingSet(IntPtr hProcess);
+'@
+}
+
+$script:demoted = @{}          # pid -> original priority class
+$script:demoteSince = @{}      # pid -> when it was demoted
+$script:lastDemote = [datetime]::MinValue
+
+function Invoke-Demote {
+    $fgPid = Get-ForegroundPid
+    $target = $null
+    foreach ($c in @(Get-Candidates -TopN 5)) {
+        # never slow down the window the user is working in right now
+        if ($fgPid -ne 0 -and [int]$c.Id -eq $fgPid) { continue }
+        if ($script:demoted.ContainsKey([int]$c.Id)) { continue }
+        $target = $c
+        break
+    }
+    if (-not $target) { return $false }
+
+    $before = 0
+    try { $before = [int]($target.WorkingSet64 / 1MB) } catch { }
+    $orig = ''
+    try { $orig = [string]$target.PriorityClass } catch { }
+
+    $prio = $false
+    try { $target.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal; $prio = $true } catch { }
+
+    $trim = $false
+    try { $trim = [MemGuard.Mem]::EmptyWorkingSet($target.Handle) } catch { }
+
+    $after = 0
+    try { $after = [int]($target.WorkingSet64 / 1MB) } catch { }
+
+    if ($prio) {
+        $script:demoted[[int]$target.Id] = $orig
+        $script:demoteSince[[int]$target.Id] = Get-Date
+    }
+    $note = ''
+    if (-not $prio) { $note += ' (priority change refused)' }
+    if ($trim) { $note += ' + working set trimmed' }
+    Write-Log ('DEMOTE {0} pid={1} ws={2}MB->{3}MB priority={4}{5}' -f `
+            $target.ProcessName, $target.Id, $before, $after, $(if ($prio) { 'BelowNormal' } else { 'unchanged' }), $note)
+    return $prio
+}
+
+function Restore-Demoted {
+    param([string]$Reason)
+    if ($script:demoted.Count -eq 0) { return }
+    foreach ($thePid in @($script:demoted.Keys)) {
+        $orig = $script:demoted[$thePid]
+        $p = Get-Process -Id $thePid -ErrorAction SilentlyContinue
+        if (-not $p) {
+            $script:demoted.Remove($thePid)
+            $script:demoteSince.Remove($thePid)
+            continue
+        }
+        $back = if ($orig) { $orig } else { 'Normal' }
+        try {
+            $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]$back
+            Write-Log ('RESTORE {0} pid={1} -> {2} ({3})' -f $p.ProcessName, $thePid, $back, $Reason)
+        } catch {
+            Write-Log ('RESTORE  failed for {0} pid={1}: {2}' -f $p.ProcessName, $thePid, $_.Exception.Message)
+        }
+        $script:demoted.Remove($thePid)
+        $script:demoteSince.Remove($thePid)
+    }
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 if ($Menu) { Show-Menu -Scripted $MenuInput; exit 0 }
@@ -1697,8 +1828,8 @@ Enable-CloseToBackground
 if ($WarnPercent -le $CriticalPercent) { throw 'WarnPercent must be greater than CriticalPercent' }
 
 Show-Config
-Write-Log ('started - warn<{0}% crit<{1}% sustain={2}x{3}s cooldown={4}s minCandidate={5}MB maxKills={6}/h dryRun={7}' -f `
-    $WarnPercent, $CriticalPercent, $SustainSamples, $IntervalSec, $CooldownSec, $MinCandidateMB, $MaxKillsPerHour, $DryRun.IsPresent)
+Write-Log ('started - warn<{0}% crit<{1}% sustain={2}x{3}s cooldown={4}s minCandidate={5}MB maxKills={6}/h emergencyCooldown={7}s emergencyMaxKills={8}/h demote={9} demoteHold={10}s dryRun={11}' -f `
+    $WarnPercent, $CriticalPercent, $SustainSamples, $IntervalSec, $CooldownSec, $MinCandidateMB, $MaxKillsPerHour, $EmergencyCooldownSec, ($MaxKillsPerHour * 3), $(if ($NoDemote) { 'off' } else { 'on' }), $DemoteHoldSec, $DryRun.IsPresent)
 
 if ($Once) {
     $sample = Get-MemorySample
@@ -1715,6 +1846,7 @@ if ($Once) {
 }
 
 $lowStreak = 0
+$healthyStreak = 0
 $lastWarn = [datetime]::MinValue
 $lastKill = [datetime]::MinValue
 $killTimes = New-Object 'System.Collections.Generic.List[datetime]'
@@ -1750,17 +1882,55 @@ while ($true) {
     $emergency = ($sample.AvailPct -lt ($CriticalPercent / 2.0))
     $shouldAct = ($lowStreak -ge $SustainSamples) -or ($emergency -and $lowStreak -ge 1)
 
+    # Degrade tier: while memory is in the warn band (and nothing is about to
+    # be killed) make the biggest process give way instead of shooting it:
+    # lower its priority, hand its pages back. Both are reversible.
+    if ($sample.AvailPct -ge $WarnPercent) { $healthyStreak++ } else { $healthyStreak = 0 }
+    if ($script:demoted.Count -gt 0) {
+        $heldLong = $false
+        foreach ($stamp in @($script:demoteSince.Values)) {
+            if (((Get-Date) - $stamp).TotalSeconds -ge $DemoteHoldSec) { $heldLong = $true; break }
+        }
+        if ($healthyStreak -ge $SustainSamples) { Restore-Demoted -Reason 'memory recovered' }
+        elseif ($heldLong) { Restore-Demoted -Reason ('hold {0}s elapsed' -f $DemoteHoldSec) }
+    }
+    # One process at a time: the machine sits in the warn band for hours on end,
+    # and demoting a new one every cooldown would leave a trail of sluggish
+    # applications behind. Wait for the current one to be restored first.
+    if (-not $NoDemote -and -not $shouldAct -and -not $emergency -and $sample.AvailPct -lt $WarnPercent -and $script:demoted.Count -eq 0) {
+        if (($now - $script:lastDemote).TotalSeconds -ge $DemoteCooldownSec) {
+            if ($DryRun) {
+                $peek = @(Get-Candidates -TopN 1)
+                if ($peek.Count -gt 0) {
+                    Write-Log ('DRY-RUN would demote {0} pid={1} ws={2}MB (BelowNormal + trim)' -f $peek[0].ProcessName, $peek[0].Id, [int]($peek[0].WorkingSet64 / 1MB))
+                    $script:lastDemote = $now
+                }
+            } elseif (Invoke-Demote) {
+                $script:lastDemote = $now
+            }
+        }
+    }
+
+    # The brake keeps the guard out of a kill-respawn-kill arms race, but when
+    # the machine is about to hard-freeze (< half the critical line) standing
+    # still is worse than the fight: the emergency tier cuts the cooldown to
+    # EmergencyCooldownSec and triples the hourly budget. The normal tier is
+    # unchanged (CooldownSec / MaxKillsPerHour).
+    $effectiveCooldown = if ($emergency) { $EmergencyCooldownSec } else { $CooldownSec }
+    $effectiveCap = if ($emergency) { $MaxKillsPerHour * 3 } else { $MaxKillsPerHour }
+
     if ($shouldAct) {
-        if (($now - $lastKill).TotalSeconds -lt $CooldownSec) {
+        if (($now - $lastKill).TotalSeconds -lt $effectiveCooldown) {
             Write-Verbose 'in cooldown - waiting'
         } else {
             $recent = @($killTimes | Where-Object { ($now - $_).TotalHours -lt 1 })
             $killTimes.Clear()
             foreach ($stamp in $recent) { $killTimes.Add($stamp) }
 
-            if ($killTimes.Count -ge $MaxKillsPerHour) {
+            if ($killTimes.Count -ge $effectiveCap) {
                 if (($now - $lastKill).TotalSeconds -ge 300) {
-                    Write-Log ('LIMIT hourly kill limit reached ({0}/h) - not acting this round' -f $MaxKillsPerHour)
+                    $tier = if ($emergency) { ' emergency' } else { '' }
+                    Write-Log ('LIMIT hourly kill limit reached ({0}/h{1}) - not acting this round' -f $effectiveCap, $tier)
                     $lastKill = $now
                 }
             } else {
