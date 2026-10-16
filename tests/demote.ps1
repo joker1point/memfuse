@@ -34,16 +34,21 @@ function Check([string]$name, [bool]$ok, [string]$detail = '') {
 
 $sandbox = $null
 $guard = $null
+$guard2 = $null
+$guard3 = $null
 $realBackup = $null
 try {
-    # 1) the victim: a renamed powershell holding ~400 MB for five minutes.
+    # 1) the victim: a renamed powershell holding ~400 MB for the whole run.
     #    The byte array must be touched page by page - a fresh array is
     #    zero-filled lazily and never shows up in the working set.
     Copy-Item -LiteralPath $psExe -Destination $sandboxExe -Force
     # Fill natively: a PowerShell page-by-page loop over 400 MB takes tens of
     # seconds, and the array must really be touched to show up in the working
-    # set (a fresh array is zero-filled lazily).
-    $cmd = '$a = New-Object byte[] 419430400; $r = New-Object System.Security.Cryptography.RNGCryptoServiceProvider; $r.GetBytes($a); $r.Dispose(); Start-Sleep -Seconds 300'
+    # set (a fresh array is zero-filled lazily). Then keep touching it: the
+    # guard trims the working set on demote (EmptyWorkingSet -> standby), and a
+    # process that never touches its pages again drops below the candidate
+    # floor and cannot be demoted a second time (this bit the restart scenario).
+    $cmd = '$a = New-Object byte[] 419430400; $r = New-Object System.Security.Cryptography.RNGCryptoServiceProvider; $r.GetBytes($a); $r.Dispose(); while ($true) { for ($i = 0; $i -lt $a.Length; $i += 4096) { $a[$i] = [byte]($i -band 255) }; Start-Sleep -Seconds 1 }'
     $sandbox = Start-Process -FilePath $sandboxExe -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-Command', $cmd) -PassThru
     $ws = 0
     for ($i = 0; $i -lt 25; $i++) {
@@ -74,10 +79,13 @@ try {
     #    No -DesktopAlert here: the alert file is only for real kills, and a
     #    false value cannot be passed through the command line (it arrives as
     #    a string and the script refuses to start).
+    #    The cooldown is huge on purpose: with DemoteCooldownSec 0 the guard
+    #    restores and re-demotes inside the same tick (one at a time, cooldown
+    #    elapsed), and the "priority is back" window becomes unobservable.
     $ga = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script,
         '-WarnPercent', '99', '-CriticalPercent', '3', '-SustainSamples', '99',
         '-IntervalSec', '3', '-MinCandidateMB', '200', '-ProtectFile', $protectFile,
-        '-DemoteCooldownSec', '0', '-DemoteHoldSec', '8', '-LogDir', $logDir)
+        '-DemoteCooldownSec', '3600', '-DemoteHoldSec', '8', '-LogDir', $logDir)
     $guard = Start-Process -FilePath $psExe -ArgumentList $ga -WindowStyle Hidden -PassThru
     Start-Sleep -Seconds 4
 
@@ -107,8 +115,64 @@ try {
     Check 'nothing was killed during the test' (@($lines | Where-Object { $_ -match 'ACTION\s+killing' }).Count -eq 0) ''
     Check 'started line advertises the degrade tier' `
         (@($lines | Where-Object { $_ -match 'started - ' -and $_ -match 'demote=on' }).Count -eq 1) ($lines -join ' | ')
+
+    # 7) a restart must not strand the victim: the live map is persisted, and the
+    #    next instance has to put back what the previous one left lowered. Kill
+    #    the first guard while it holds the victim, then start a fresh guard
+    #    with -NoDemote: it cannot lower anything on its own, so any priority we
+    #    see coming back can only come from the startup takeover.
+    Stop-Process -Id $guard.Id -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    $p = Get-Process -Id $sandbox.Id -ErrorAction SilentlyContinue
+    if ($p -and $p.PriorityClass -eq 'BelowNormal') { $p.PriorityClass = 'Normal' }   # normalise first
+    $stateFile = Join-Path $logDir 'demote-state.txt'
+    Remove-Item -LiteralPath $stateFile -Force -ErrorAction SilentlyContinue
+
+    $ga2 = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script,
+        '-WarnPercent', '99', '-CriticalPercent', '3', '-SustainSamples', '99',
+        '-IntervalSec', '3', '-MinCandidateMB', '200', '-ProtectFile', $protectFile,
+        '-DemoteCooldownSec', '0', '-DemoteHoldSec', '600', '-LogDir', $logDir)
+    $guard2 = Start-Process -FilePath $psExe -ArgumentList $ga2 -WindowStyle Hidden -PassThru
+    $lowered = $false
+    for ($i = 0; $i -lt 12 -and -not $lowered; $i++) {
+        Start-Sleep -Seconds 1
+        $p = Get-Process -Id $sandbox.Id -ErrorAction SilentlyContinue
+        if ($p -and $p.PriorityClass -eq 'BelowNormal') { $lowered = $true }
+    }
+    Check 'guard 2 lowers the victim (long hold)' $lowered ''
+    Check 'demote state persisted to disk' (Test-Path -LiteralPath $stateFile) ''
+
+    Stop-Process -Id $guard2.Id -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    $p = Get-Process -Id $sandbox.Id -ErrorAction SilentlyContinue
+    Check 'victim stays lowered after the guard is killed' ($p -and $p.PriorityClass -eq 'BelowNormal') `
+        ('priority=' + $(if ($p) { $p.PriorityClass } else { 'gone' }))
+
+    $ga3 = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script,
+        '-WarnPercent', '99', '-CriticalPercent', '3', '-SustainSamples', '99',
+        '-IntervalSec', '3', '-MinCandidateMB', '200', '-ProtectFile', $protectFile,
+        '-NoDemote', '-LogDir', $logDir)
+    $guard3 = Start-Process -FilePath $psExe -ArgumentList $ga3 -WindowStyle Hidden -PassThru
+    $back = $false
+    $takeover = $false
+    $logFile = Get-ChildItem -LiteralPath $logDir -Filter '*.log' -ErrorAction SilentlyContinue | Select-Object -First 1
+    $lines = if ($logFile) { @(Get-Content -LiteralPath $logFile.FullName) } else { @() }
+    for ($i = 0; $i -lt 20 -and -not ($back -and $takeover); $i++) {
+        Start-Sleep -Seconds 1
+        $p = Get-Process -Id $sandbox.Id -ErrorAction SilentlyContinue
+        if ($p -and $p.PriorityClass -ne 'BelowNormal') { $back = $true }
+        if ($logFile) {
+            $lines = @(Get-Content -LiteralPath $logFile.FullName -ErrorAction SilentlyContinue)
+            if (@($lines | Where-Object { $_ -match ('RESTORE ' + $sandboxName) -and $_ -match 'stranded by a guard restart' }).Count -ge 1) { $takeover = $true }
+        }
+    }
+    Check 'restarted guard takes the stranded victim back' $back ''
+    Check 'stranded takeover is logged' $takeover ($lines -join ' | ')
+    Check 'state file removed after the takeover' (-not (Test-Path -LiteralPath $stateFile)) ''
 } finally {
     if ($guard -and -not $guard.HasExited) { Stop-Process -Id $guard.Id -Force -ErrorAction SilentlyContinue }
+    if ($guard2 -and -not $guard2.HasExited) { Stop-Process -Id $guard2.Id -Force -ErrorAction SilentlyContinue }
+    if ($guard3 -and -not $guard3.HasExited) { Stop-Process -Id $guard3.Id -Force -ErrorAction SilentlyContinue }
     if ($sandbox -and -not $sandbox.HasExited) { Stop-Process -Id $sandbox.Id -Force -ErrorAction SilentlyContinue }
     if ($realBackup -and (Test-Path $realBackup)) {
         Copy-Item -LiteralPath $realBackup -Destination $realProtect -Force

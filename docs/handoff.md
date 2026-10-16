@@ -19,7 +19,7 @@
   - `v1.2.0`（PR #2 + #3 merged，main = `0e05c8f`：白名单小白化 / 数字菜单 / `-PreferIdle`）
   - PR #4 merged（main = `e79399a`）+ `v1.2.1`：桌面快捷方式（装守护现建、卸载删）
   - PR #5 merged（`a61b596`：托盘模式 + 手动干预 `-ShowProcMem` / `-KillProc` / 托盘双击开菜单 / 菜单 6-8 项）+ **`v1.3.0`**；随后两个发版修复：`7170e28`（`.gitattributes` 补 `*.cmd` CRLF + zip 验收闸门）、`864a980`（闸门判据改为「含非 ASCII 才要求 BOM」，本地预演抓到的过严条件）
-- **main 上已合、未发版（2026-10-16）**：① 菜单精简（`0`/`6` 下架——`0` 留作隐藏退出键；2+4 合并为「保护名单」、3+5 合并为「守护开关」）；② **紧急档放宽**：可用 `< 3.5%` 时冷却压到 `-EmergencyCooldownSec`(3s)、小时上限 ×3，不再在"要堵死"时干等；配套 `-DryRun` 的 would-kill 也计入刹车（预览忠实）+ 新增 `tests/kill-brake.ps1`。③ **降级档（不杀只让路）**：警告线（12%）以下把最大的非前台进程降到 `BelowNormal` + `EmptyWorkingSet` 回收工作集；内存恢复或 `-DemoteHoldSec`(600s) 后还原优先级；`-NoDemote` 可关。配套新增 `tests/demote.ps1`。发版时记得写进 Release 说明与版本历史。
+- **main 上已合、未发版（2026-10-16）**：① 菜单精简（`0`/`6` 下架——`0` 留作隐藏退出键；2+4 合并为「保护名单」、3+5 合并为「守护开关」）；② **紧急档放宽**：可用 `< 3.5%` 时冷却压到 `-EmergencyCooldownSec`(3s)、小时上限 ×3，不再在"要堵死"时干等；配套 `-DryRun` 的 would-kill 也计入刹车（预览忠实）+ 新增 `tests/kill-brake.ps1`。③ **降级档（不杀只让路）**：警告线（12%）以下把最大的非前台进程降到 `BelowNormal` + `EmptyWorkingSet` 回收工作集；内存恢复或 `-DemoteHoldSec`(600s) 后还原优先级；`-NoDemote` 可关。配套新增 `tests/demote.ps1`（13 项，含"守护被杀 → 新实例启动接手还原"）。④ **降级状态落盘**：降级记录写 `<LogDir>\demote-state.txt`，启动时 `Restore-StrandedDemotes` 把上一个实例搁下的进程还原（当天实测：守护重启曾把 2 个进程搁在 `BelowNormal` 不再回来）。发版时记得写进 Release 说明与版本历史。
 
 ## 2. 开发机生产守护状态与回滚
 

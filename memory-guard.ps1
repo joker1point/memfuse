@@ -95,7 +95,10 @@
 
 .PARAMETER DemoteHoldSec
     How long a demoted process keeps the lowered priority at most (default
-    600 s). The priority is also restored as soon as memory recovers.
+    600 s). The priority is also restored as soon as memory recovers. The
+    demoted pids are persisted to <LogDir>\demote-state.txt, so a restarted
+    guard puts stranded processes back on startup instead of leaving them
+    lowered forever.
 
 .PARAMETER GracefulSeconds
     How long to wait for a windowed process to close itself (WM_CLOSE) before
@@ -1730,6 +1733,29 @@ $script:demoted = @{}          # pid -> original priority class
 $script:demoteSince = @{}      # pid -> when it was demoted
 $script:lastDemote = [datetime]::MinValue
 
+# The two maps above live in RAM, but this process can be restarted at any
+# moment (heartbeat self-heal, manual restart, a release). Persist them next to
+# the logs so the next instance can put back whatever the previous one left
+# lowered instead of stranding it at BelowNormal forever (2026-10-16: caught it
+# the hard way - two processes were left lowered by a restart).
+$DemoteStateFile = Join-Path $LogDir 'demote-state.txt'
+
+function Save-DemoteState {
+    try {
+        if ($script:demoted.Count -eq 0) {
+            if (Test-Path -LiteralPath $DemoteStateFile) { Remove-Item -LiteralPath $DemoteStateFile -Force }
+            return
+        }
+        $rows = foreach ($thePid in @($script:demoted.Keys)) {
+            $nm = ''
+            try { $p = Get-Process -Id $thePid -ErrorAction SilentlyContinue; if ($p) { $nm = $p.ProcessName } } catch { }
+            $since = if ($script:demoteSince.ContainsKey($thePid)) { $script:demoteSince[$thePid].ToString('s') } else { '' }
+            '{0}|{1}|{2}|{3}' -f $thePid, $script:demoted[$thePid], $since, $nm
+        }
+        [IO.File]::WriteAllLines($DemoteStateFile, @($rows))
+    } catch { }
+}
+
 function Invoke-Demote {
     $fgPid = Get-ForegroundPid
     $target = $null
@@ -1759,6 +1785,7 @@ function Invoke-Demote {
     if ($prio) {
         $script:demoted[[int]$target.Id] = $orig
         $script:demoteSince[[int]$target.Id] = Get-Date
+        Save-DemoteState
     }
     $note = ''
     if (-not $prio) { $note += ' (priority change refused)' }
@@ -1789,6 +1816,40 @@ function Restore-Demoted {
         $script:demoted.Remove($thePid)
         $script:demoteSince.Remove($thePid)
     }
+    Save-DemoteState
+}
+
+function Restore-StrandedDemotes {
+    # A previous instance may have been restarted while it held processes at
+    # BelowNormal: its RAM maps are gone, the state file is not. Put them back
+    # before this instance starts lowering anything of its own.
+    if (-not (Test-Path -LiteralPath $DemoteStateFile)) { return }
+    $rows = @(Get-Content -LiteralPath $DemoteStateFile -ErrorAction SilentlyContinue)
+    $restored = 0
+    foreach ($row in $rows) {
+        $parts = @($row -split '\|')
+        if ($parts.Count -lt 2) { continue }
+        $thePid = 0
+        if (-not [int]::TryParse($parts[0].Trim(), [ref]$thePid)) { continue }
+        $orig = $parts[1].Trim()
+        if (-not $orig) { $orig = 'Normal' }
+        $p = Get-Process -Id $thePid -ErrorAction SilentlyContinue
+        if (-not $p) { continue }
+        # Only touch a process that is still sitting exactly where we left it;
+        # if it re-raised itself (or someone else changed it), leave it alone.
+        $cur = ''
+        try { $cur = [string]$p.PriorityClass } catch { }
+        if ($cur -ne 'BelowNormal') { continue }
+        try {
+            $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]$orig
+            Write-Log ('RESTORE {0} pid={1} -> {2} (stranded by a guard restart)' -f $p.ProcessName, $thePid, $orig)
+            $restored++
+        } catch {
+            Write-Log ('RESTORE  failed for {0} pid={1}: {2}' -f $p.ProcessName, $thePid, $_.Exception.Message)
+        }
+    }
+    Remove-Item -LiteralPath $DemoteStateFile -Force -ErrorAction SilentlyContinue
+    if ($restored -gt 0) { Write-Log ('took over {0} stranded demotion(s) from a previous instance' -f $restored) }
 }
 
 # ---------------------------------------------------------------------------
@@ -1830,6 +1891,10 @@ if ($WarnPercent -le $CriticalPercent) { throw 'WarnPercent must be greater than
 Show-Config
 Write-Log ('started - warn<{0}% crit<{1}% sustain={2}x{3}s cooldown={4}s minCandidate={5}MB maxKills={6}/h emergencyCooldown={7}s emergencyMaxKills={8}/h demote={9} demoteHold={10}s dryRun={11}' -f `
     $WarnPercent, $CriticalPercent, $SustainSamples, $IntervalSec, $CooldownSec, $MinCandidateMB, $MaxKillsPerHour, $EmergencyCooldownSec, ($MaxKillsPerHour * 3), $(if ($NoDemote) { 'off' } else { 'on' }), $DemoteHoldSec, $DryRun.IsPresent)
+
+# Take over whatever a previous instance left lowered (see Restore-StrandedDemotes).
+# A dry run never changes the machine, so it leaves the state file to a real one.
+if (-not $DryRun) { Restore-StrandedDemotes }
 
 if ($Once) {
     $sample = Get-MemorySample
