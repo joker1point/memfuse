@@ -1,7 +1,7 @@
 # memfuse 维护者交接（handoff）
 
 > 分工：**README = 用户向**（定位 / 决策机制 / 快速开始 / 战报 / 局限）；**本文 = 维护者向**（发版流程 / 部署状态 / 修改红线 / 回滚）。
-> 最近更新：2026-10-15
+> 最近更新：2026-10-16
 
 ## 1. 发版流程与节奏
 
@@ -12,14 +12,14 @@
   - 2026-10-15 起 `release.yml` 多了**一道验收闸**：构建后逐个检查 zip 内 `.ps1/.cmd/.bat` 是否 CRLF、含非 ASCII 的 `.ps1` 是否带 UTF-8 BOM，不过关直接失败不发布。
 - **发版后必须验收交付物本体**：`gh release download v1.3.0 --dir <tmp>` → 解包 → 查行尾/BOM → **从解包出来的目录里真跑一条只读命令**（`memfuse.cmd -ShowProcMem explorer`）。2026-10-15 靠这一步抓到 `.cmd` 在 zip 里是纯 LF（见 §5）。
 - **对外更新渠道 = Release 说明 + README**（2026-10-08 用户决定：v1.2.0 更新视频已出片但不发，「没必要发视频，在 github 上说了就好」——**别再催投稿**）。注意 `release.yml` 会先用占位说明（`See the assets below.`）自动建 release，**发版后要 `gh release edit <tag> --notes-file …` 换成正式说明**。
-- B 站节奏（若恢复）：每攒够 3 个用户可见更新发一支更新视频。**当前批次计数 = 2/3**（v1.3.0 = 第 2 个；自 v1.2.1 发布起算）。
+- B 站节奏（若恢复）：每攒够 3 个用户可见更新发一支更新视频。**当前批次计数 = 3/3**（v1.4.0 = 第 3 个；自 v1.2.1 发布起算）——已满 3，但按 2026-10-08 的决定**不主动推视频**。
 - 版本历史速览：
   - `v1.0.0`（原版，tag → `fd507f3`）
   - PR #1 merged（`c567750`：窗口宽限/白名单热加载/`memfuse.cmd`）
   - `v1.2.0`（PR #2 + #3 merged，main = `0e05c8f`：白名单小白化 / 数字菜单 / `-PreferIdle`）
   - PR #4 merged（main = `e79399a`）+ `v1.2.1`：桌面快捷方式（装守护现建、卸载删）
   - PR #5 merged（`a61b596`：托盘模式 + 手动干预 `-ShowProcMem` / `-KillProc` / 托盘双击开菜单 / 菜单 6-8 项）+ **`v1.3.0`**；随后两个发版修复：`7170e28`（`.gitattributes` 补 `*.cmd` CRLF + zip 验收闸门）、`864a980`（闸门判据改为「含非 ASCII 才要求 BOM」，本地预演抓到的过严条件）
-- **main 上已合、未发版（2026-10-16）**：① 菜单精简（`0`/`6` 下架——`0` 留作隐藏退出键；2+4 合并为「保护名单」、3+5 合并为「守护开关」）；② **紧急档放宽**：可用 `< 3.5%` 时冷却压到 `-EmergencyCooldownSec`(3s)、小时上限 ×3，不再在"要堵死"时干等；配套 `-DryRun` 的 would-kill 也计入刹车（预览忠实）+ 新增 `tests/kill-brake.ps1`。③ **降级档（不杀只让路）**：警告线（12%）以下把最大的非前台进程降到 `BelowNormal` + `EmptyWorkingSet` 回收工作集；内存恢复或 `-DemoteHoldSec`(600s) 后还原优先级；`-NoDemote` 可关。配套新增 `tests/demote.ps1`（13 项，含"守护被杀 → 新实例启动接手还原"）。④ **降级状态落盘**：降级记录写 `<LogDir>\demote-state.txt`，启动时 `Restore-StrandedDemotes` 把上一个实例搁下的进程还原（当天实测：守护重启曾把 2 个进程搁在 `BelowNormal` 不再回来）。发版时记得写进 Release 说明与版本历史。
+  - **`v1.4.0`**（`ed3f732` + `47d6b37`，main = `47d6b37`）：**降级档**（不杀只让路：警告线以下把最大的非前台进程降到 `BelowNormal` + 回收工作集，内存恢复或 `-DemoteHoldSec`(600s) 后还原，`-NoDemote` 可关）/ 菜单瘦身 5 项（`0`/`6` 下架，`0` 留作隐藏退出键；2+4、3+5 合并）/ 紧急档松绑（`< 3.5%` 时 `-EmergencyCooldownSec` 3s、上限 ×3）/ **降级状态落盘**（`<LogDir>\demote-state.txt` + 启动 `Restore-StrandedDemotes` 接手还原）；配套 `tests/kill-brake.ps1`、`tests/demote.ps1`（13 项）
 
 ## 2. 开发机生产守护状态与回滚
 
@@ -28,6 +28,7 @@
 - 2026-10-14 20:19：守护重启加载 `-ShowProcMem` / `-KillProc` 新版（pid 58084，启动时间晚于脚本 mtime，日志有新 `started` 行）；同时清掉一个 10-08 遗留的旧菜单壳（否则在里面按 7/8 不识别）。
 - 2026-10-15：pid 58084 于 15:07–15:19 间死亡（机器未重启、uptime 23 天，死因未查明）；**15:19:10 被 5 分钟心跳（计划任务 `MemoryGuard` 重复触发）自动拉起为 pid 72460，日志有新 `started` 行**——自愈机制首次在真实故障中生效。运行中 72460 的守护代码与 main HEAD 逐字节一致（`git diff 2441397 HEAD -- memory-guard.ps1` 为空）→ 无需再次重启。
 - 2026-10-15：托盘**不在自愈范围内**（用户托盘 88868 同晚消失也没回来）——需手动双击 `tray.cmd`；当日维护会话已重新拉起（pid 29632）。
+- 2026-10-16：守护/托盘各重启两轮（14:16 守护 pid 22248 加载紧急档 → 15:21 **守护 pid 24360 + 托盘 pid 3524** 加载降级档 + 落盘修复；两轮都以"启动时间晚于脚本 mtime + 日志新 `started` 行"验证）。降级档已在本机真实触发（`Tabbit Browser` / `SogouCloud` / `WorkBuddy`）；**降级状态写 `<LogDir>\demote-state.txt`**（守护重启后由新实例接手还原，已实测生成与清理）。仍在的旧包袱：`C:\Users\biren\Desktop\.git` 本地化石仓库（1 文件、无 remote）未处置。
 
 ## 3. 修改红线
 
