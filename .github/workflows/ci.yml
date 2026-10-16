@@ -1,0 +1,45 @@
+name: ci
+
+# push 到 main（含 PR）自动跑：PowerShell 语法解析 → README 素材规范 → 对外材料红线。
+#
+# 测试套件（tests/*.ps1，13 项）是**杀伤类**（受控沙包 + 全量白名单隔离 + 断言降级/还原/无击杀），
+# 只在本机跑；runner 上从简。发版侧的 CRLF / BOM 资产闸门由 release.yml 承担。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    name: "语法 · 素材规范 · 红线"
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "PowerShell 语法解析（全部 .ps1，含 tests/）"
+        shell: pwsh
+        run: |
+          $bad = 0
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $errs = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errs) | Out-Null
+            if ($errs.Count -gt 0) {
+              $bad++
+              Write-Host "::error file=$($_.Name)::$($errs.Count) 个语法错误"
+              $errs | ForEach-Object { Write-Host "    $($_.Message)" }
+            }
+          }
+          if ($bad -gt 0) { exit 1 }
+          Write-Host "全部 .ps1 语法解析通过"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: "README 素材规范（先报告：当前 0 张；补图后删 continue-on-error 转强制）"
+        continue-on-error: true
+        run: python tools/check_readme_shots.py .
+
+      - name: "对外材料红线（品牌词 / 凭据）"
+        run: python tools/check_public_materials.py
