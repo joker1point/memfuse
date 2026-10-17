@@ -8,6 +8,14 @@
 > **可用内存跌到临界、整机开始卡顿之前，先给最大的那个进程"降级"，真到临界才杀掉它**，把系统从悬崖边拉回来。
 > 单文件 PowerShell（约 500 行），零依赖，克隆即用。**这是最后防线，不是内存优化器。**
 
+<!-- README-SHOTS: N=9（功能点：自动守护 / 降级档 / 手动强杀 / 白名单 / 三档预设 / 托盘常驻 / 桌面快捷方式 / 查进程内存 / 交给 Agent 的 JSON 接口） -->
+
+<p align="center">
+  <img src="docs/screenshots/menu.png" width="820"
+       alt="memfuse 主菜单（真机截图）：顶部一行当前状态（守护是否在跑、白名单几项），下面 5 个动作：演练、保护名单、守护开关、查进程内存、强杀指定进程"><br>
+  <sub>主菜单（真机截图）：先看一行状态，再按数字选动作 —— 不想敲命令时，双击 <code>memfuse.cmd</code> 就是这一屏。</sub>
+</p>
+
 名字取自保险丝：它不阻止过载，只在过载时**牺牲最大的那一个，保住整条电路**。
 
 ---
@@ -294,6 +302,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Preset s
 【快捷方式】`-CreateShortcut`（在桌面放一个回到菜单的快捷方式；`-InstallTask` 会顺手做）`-RemoveShortcut`（删掉它）
 
 【机器可读】`-Json [-OutFile <路径>]`（状态 JSON：内存采样 / 档位 / 阈值 / **当前候选** / 已降级 / 白名单 / 日志尾部——**只读**，不杀不降级不改名单）`-AgentGuide [-OutFile <路径>]`（生成「交给 Agent」的接口说明，整段转发给任意 AI Agent）
+
+### 界面（两张真机截图）
+
+<p align="center">
+  <img src="docs/screenshots/whitelist.png" width="820"
+       alt="保护名单文件视图（真机截图）：路径、带行号的名单内容、三种改法与热重载说明"><br>
+  <sub>名单就是一张文本表（真机截图）：每行一个进程名，改完 5 秒内生效、不用重启；三种改法都印在同一屏。</sub>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/procmem.png" width="820"
+       alt="查进程内存（真机截图）：同名进程逐个列出 pid / 工作集 / 是否已保护，末尾给出合计与占物理内存比"><br>
+  <sub>查指定进程占多少内存（真机截图）：同名进程逐个列出 pid 与工作集，并标出「已保护」——这些永远不会被终止。</sub>
+</p>
 
 ### 交给 Agent：只读状态 JSON + 交接说明（2026-10-17）
 

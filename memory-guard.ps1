@@ -539,6 +539,7 @@ function Shorten-Text {
 }
 
 function Show-ProtectList {
+    try { $Host.UI.RawUI.WindowTitle = 'memfuse · 保护名单' } catch { }
     Write-Host '============ 受保护进程（永不被终止）============'
     Write-Host ('系统内置（杀了会导致蓝屏/注销，共 {0} 项）：' -f $SystemProtected.Count)
     foreach ($name in ($SystemProtected | Sort-Object)) { Write-Host ('    ' + $name) }
@@ -753,6 +754,7 @@ function Test-ProcNameMatch {
 
 function Show-ProcMemory {
     param([string[]]$Names)
+    try { $Host.UI.RawUI.WindowTitle = 'memfuse · 进程内存' } catch { }
 
     # Names may arrive as an array (PowerShell prompt) or as one literal
     # "chatgpt,code" string (powershell -File); ConvertTo-NameList handles both.
@@ -1064,6 +1066,7 @@ Write-Host '  交给 Agent  : memfuse.cmd -AgentGuide（接口说明）| -Json -
 # ---------------------------------------------------------------------------
 function Show-Menu {
     param([string]$Scripted)
+    try { $Host.UI.RawUI.WindowTitle = 'memfuse · 菜单' } catch { }
 
     # -MenuInput "2,1,0" = menu choice 2, let the picker answer 1, then quit.
     # 0 is no longer listed on the menu (closing the window quits), but it stays
