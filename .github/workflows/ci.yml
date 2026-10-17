@@ -1,9 +1,13 @@
 name: ci
 
-# push 到 main（含 PR）自动跑：PowerShell 语法解析 → README 素材规范 → 对外材料红线。
+# push 到 main（含 PR）自动跑：PowerShell 语法解析 → 只读接口自测 → README 素材规范 → 对外材料红线。
 #
-# 测试套件（tests/*.ps1，13 项）是**杀伤类**（受控沙包 + 全量白名单隔离 + 断言降级/还原/无击杀），
-# 只在本机跑；runner 上从简。发版侧的 CRLF / BOM 资产闸门由 release.yml 承担。
+# 测试套件（tests/*.ps1，11 项）多为**杀伤类**（受控沙包 + 全量白名单隔离 + 断言降级/还原/无击杀），
+# 只在本机跑；runner 上只跑无沙包、纯只读的 tests/json-interface.ps1。
+# 发版侧的 CRLF / BOM 资产闸门由 release.yml 承担。
+#
+# 2026-10-17：README 补齐 3 张真机截图（功能点 9 → 需 3 张），素材规范这一步从"先报告"
+# 转成硬闸门 —— 以后改 README 掉回 0 张会直接红。
 
 on:
   push:
@@ -46,8 +50,7 @@ jobs:
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/json-interface.ps1
 
-      - name: "README 素材规范（先报告：当前 0 张；补图后删 continue-on-error 转强制）"
-        continue-on-error: true
+      - name: "README 素材规范（数量按功能点数 / 形式按复杂度）"
         run: python tools/check_readme_shots.py .
 
       - name: "对外材料红线（品牌词 / 凭据）"
