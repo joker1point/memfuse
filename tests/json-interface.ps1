@@ -38,10 +38,16 @@ function Invoke-Guard([string[]]$extra) {
 
 function Get-TreeHash([string]$dir) {
     # Name + length + last-write-time of every file under $dir, in one string.
-    if (-not (Test-Path -LiteralPath $dir)) { return '<missing>' }
-    return (@(Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue |
+    # A missing dir and an EMPTY dir compare equal on purpose: the guard creates
+    # <script dir>\logs during startup - before the read path runs - so on a fresh
+    # clone the directory itself may appear. What must not change is any *file*
+    # inside it (a log line, an alert file, a demote-state record).
+    if (-not (Test-Path -LiteralPath $dir)) { return '<empty>' }
+    $rows = @(Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue |
             Sort-Object Name |
-            ForEach-Object { '{0}|{1}|{2}' -f $_.Name, $_.Length, $_.LastWriteTimeUtc.Ticks }) -join ';')
+            ForEach-Object { '{0}|{1}|{2}' -f $_.Name, $_.Length, $_.LastWriteTimeUtc.Ticks })
+    if ($rows.Count -eq 0) { return '<empty>' }
+    return ($rows -join ';')
 }
 
 $tmp = Join-Path $env:TEMP ('mf-json-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
