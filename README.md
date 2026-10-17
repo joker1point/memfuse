@@ -293,6 +293,26 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Preset s
 
 【快捷方式】`-CreateShortcut`（在桌面放一个回到菜单的快捷方式；`-InstallTask` 会顺手做）`-RemoveShortcut`（删掉它）
 
+【机器可读】`-Json [-OutFile <路径>]`（状态 JSON：内存采样 / 档位 / 阈值 / **当前候选** / 已降级 / 白名单 / 日志尾部——**只读**，不杀不降级不改名单）`-AgentGuide [-OutFile <路径>]`（生成「交给 Agent」的接口说明，整段转发给任意 AI Agent）
+
+### 交给 Agent：只读状态 JSON + 交接说明（2026-10-17）
+
+守护的决策（谁被降级、现在谁是候选）原本只活在进程内存和给人看的日志里——外部 Agent 拿不到，也就答不出"刚才为什么杀了 X"。两个开关把它变成可读接口：
+
+```powershell
+# 状态 JSON：schema memfuse.status v1（UTF-8 带 BOM 落盘）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -Json -OutFile status.json
+
+# 接口说明（Markdown）：整段复制/转发给任意 Agent，它即按契约调用
+powershell -NoProfile -ExecutionPolicy Bypass -File .\memory-guard.ps1 -AgentGuide -OutFile agent-guide.md
+```
+
+JSON 关键字段：`memory`（`freeMB` / `freePercent` / `commitPercent`）· `tier`（`healthy` / `warn` / `critical`）· `thresholds`（各档阈值与开关）· `candidates[]`（**当前会动手的候选**，已排除白名单与"你正在看的应用"及其同名子进程）· `demoted[]`（被降级还没还原的）· `protected`（内置 + 名单条目）· `todayLog.tail`（今天日志尾部）。
+
+两条纪律：**读路径只读**——`-Json` / `-AgentGuide` 不杀进程、不降级、不改名单（自测里用前后哈希断言了这一点）；中文一律走 `-OutFile` 落盘，不要依赖 stdout 的编码（Windows 控制台默认 GBK，管道里会把中文写坏）。
+
+与 [ExeTrace](https://github.com/joker1point/ExeTrace) 联动：装了原生版（≥ v1.1.0）后可在它的应用列表里右键「加入 memfuse 白名单」，CLI 等价写法 `ExeTrace.exe --whitelist "<进程名或 exe 路径>"`——那条路调的就是本脚本的 `-AddProtect`（同一套幂等写入，不存在第二份名单逻辑）。
+
 【托盘】`-Tray`（窗口隐藏 + 通知区图标：右键打开菜单 / 保护名单 / 名单文件 / 今天的日志 / 工具文件夹 —— **后三项是命令行窗口、停住不自动关**；悬停看实时可用内存；关掉窗口也不丢，会以隐藏方式把自己重新拉起）
 
 【白名单的三种改法】① 双击 `whitelist.cmd`（推荐，选编号）；② `-Pick`（同上的命令行版）；③ 直接编辑 `protect-list.txt`（每行一个进程名）。**三种都立即生效，不用重启守护**；写错名字会有明确提示，不会静默失效。

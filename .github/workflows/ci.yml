@@ -42,6 +42,10 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: "只读接口自测（-Json / -AgentGuide）"
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/json-interface.ps1
+
       - name: "README 素材规范（先报告：当前 0 张；补图后删 continue-on-error 转强制）"
         continue-on-error: true
         run: python tools/check_readme_shots.py .

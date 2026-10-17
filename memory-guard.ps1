@@ -154,6 +154,24 @@
 .PARAMETER LogTail
     How many lines -ShowLog prints. Default 60.
 
+.PARAMETER Json
+    Print the guard's current state as JSON (schema memfuse.status v1) and exit -
+    the read-only data interface for external agents/tools: memory sample, tier,
+    thresholds, current candidates, demoted processes, protection list, log tail.
+    Add -OutFile <path> to write it to a file (UTF-8 with BOM, so PowerShell's
+    Get-Content and Python's utf-8-sig both read it correctly) instead of stdout.
+    Nothing is ever killed, demoted or written by this switch.
+
+.PARAMETER OutFile
+    Optional path used by -Json: write the status JSON there instead of stdout.
+    Recommended for pipes/redirects - the console encoding is not reliable for
+    non-ASCII process names.
+
+.PARAMETER AgentGuide
+    Print a Markdown handover note (interface contract for AI agents: what can be
+    read, what can be asked to do, and the safety semantics) and exit. Copy the
+    whole text to any agent; nothing is executed.
+
 .PARAMETER ListWindowed
     List the processes that currently own a visible window - the ones that may
     hold unsaved work - and exit. Use it to build your whitelist before
@@ -315,6 +333,10 @@ param(
     [switch]$ListProtected,
     [switch]$ListWindowed,
     [switch]$ShowProtectFile,
+
+    [switch]$Json,
+    [string]$OutFile,
+    [switch]$AgentGuide,
     [switch]$ShowLog,
     [ValidateRange(1, 10000)][int]$LogTail = 60,
     [string[]]$ShowProcMem = @(),
@@ -1031,6 +1053,8 @@ function Show-Usage {
     Write-Host '其他常用：-ListWindowed 谁有窗口 | -ListProtected 现有名单 | -UninstallTask 卸载'
     Write-Host '  查进程内存  : memfuse.cmd -ShowProcMem chatgpt   看指定进程占多少内存'
     Write-Host '                 （名字大小写无所谓；支持通配符 chat*、一次多个 code,node）'
+Write-Host '  交给 Agent  : memfuse.cmd -AgentGuide（接口说明）| -Json -OutFile status.json（状态 JSON）'
+
     Write-Host '  强杀指定进程: memfuse.cmd -KillProc   列出可杀的进程，输编号或名字，确认后终止'
     Write-Host ''
 }
@@ -1954,6 +1978,222 @@ function Restore-StrandedDemotes {
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# machine-readable state + agent handover note (2026-10-17)
+#
+# Why: the guard's decisions (who was demoted, who is a candidate right now) only
+# exist inside this process and in a human-readable log. An external agent cannot
+# answer "why did it kill X just now" without them. This block exposes the same
+# facts as JSON, and a Markdown contract describing what may be asked for.
+#
+# Boundary: the read path is **read-only** - it never kills, demotes, trims or
+# rewrites the whitelist. Every action stays an explicit switch (-AddProtect /
+# -RemoveProtect / -KillProc -KillProcInput), exactly as when a human types it.
+# ---------------------------------------------------------------------------
+function Get-ProtectFileEntries {
+    # Effective entries of protect-list.txt (comments/blank lines stripped),
+    # keeping the original casing from the file.
+    if (-not (Test-Path -LiteralPath $ProtectFile)) { return @() }
+    $out = @()
+    foreach ($line in @(Get-Content -LiteralPath $ProtectFile -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+        $entry = ($line -split '#')[0].Trim()
+        if ($entry) { $out += $entry }
+    }
+    return $out
+}
+
+function Get-GuardStatus {
+    $sample = Get-MemorySample
+    $tier = 'healthy'
+    if ($sample.AvailPct -lt $WarnPercent) { $tier = 'warn' }
+    if ($sample.AvailPct -lt $CriticalPercent) { $tier = 'critical' }
+
+    # Same enumeration the guard itself acts on: whitelist and the app owning the
+    # foreground window (whole name family) are already excluded in there.
+    $candidates = @()
+    foreach ($c in @(Get-Candidates -TopN 5)) {
+        $candidates += [pscustomobject]@{
+            name         = $c.ProcessName
+            pid          = [int]$c.Id
+            workingSetMB = [int][math]::Round($c.WorkingSet64 / 1MB)
+        }
+    }
+
+    $demoted = @()
+    foreach ($thePid in @($script:demoted.Keys)) {
+        $nm = ''
+        try { $p = Get-Process -Id $thePid -ErrorAction SilentlyContinue; if ($p) { $nm = $p.ProcessName } } catch { }
+        $demoted += [pscustomobject]@{
+            pid              = [int]$thePid
+            name             = $nm
+            originalPriority = [string]$script:demoted[$thePid]
+            since            = $(if ($script:demoteSince.ContainsKey($thePid)) { $script:demoteSince[$thePid].ToString('s') } else { '' })
+        }
+    }
+
+    $tail = @()
+    $logLines = 0
+    if (Test-Path -LiteralPath $LogFile) {
+        $all = @(Get-Content -LiteralPath $LogFile -Encoding UTF8 -ErrorAction SilentlyContinue)
+        $logLines = $all.Count
+        $tail = @($all | Select-Object -Last ([math]::Max(1, $LogTail)))
+    }
+    $fileEntries = @(Get-ProtectFileEntries)
+
+    [pscustomobject]@{
+        schema        = 'memfuse.status'
+        schemaVersion = 1
+        tool          = 'memfuse'
+        ts            = (Get-Date).ToString('s')
+        memory        = [pscustomobject]@{
+            totalMB       = $sample.TotalMB
+            freeMB        = $sample.AvailMB
+            freePercent   = $sample.AvailPct
+            commitPercent = $sample.CommitPct
+        }
+        tier          = $tier
+        thresholds    = [pscustomobject]@{
+            warnPercent              = $WarnPercent
+            criticalPercent          = $CriticalPercent
+            minCandidateMB           = $MinCandidateMB
+            sustainSamples           = $SustainSamples
+            intervalSec              = $IntervalSec
+            cooldownSec              = $CooldownSec
+            maxKillsPerHour          = $MaxKillsPerHour
+            emergencyCooldownSec     = $EmergencyCooldownSec
+            emergencyMaxKillsPerHour = ($MaxKillsPerHour * 3)
+            windowedAction           = $WindowedAction
+            demoteEnabled            = (-not $NoDemote)
+            demoteCooldownSec        = $DemoteCooldownSec
+            demoteHoldSec            = $DemoteHoldSec
+            dryRun                   = [bool]$DryRun
+        }
+        paths         = [pscustomobject]@{
+            script          = $PSCommandPath
+            protectFile     = $ProtectFile
+            logFile         = $LogFile
+            demoteStateFile = $DemoteStateFile
+        }
+        candidates    = $candidates
+        demoted       = $demoted
+        protected     = [pscustomobject]@{
+            builtinCount   = $SystemProtected.Count
+            fileEntryCount = $fileEntries.Count
+            fileEntries    = $fileEntries
+        }
+        todayLog      = [pscustomobject]@{
+            lines = $logLines
+            tail  = $tail
+        }
+    }
+}
+
+function Show-StatusJson {
+    param([string]$Path)
+    $json = Get-GuardStatus | ConvertTo-Json -Depth 6
+    if ($Path) {
+        $full = [IO.Path]::GetFullPath($Path)
+        $dir = Split-Path -Parent $full
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        # UTF-8 **with BOM** on purpose: PowerShell 5.1 reads a BOM-less file as
+        # ANSI (Chinese process names turn to mojibake), while Python/jq accept
+        # the BOM - so this is the one encoding both sides read correctly.
+        [IO.File]::WriteAllText($full, $json, (New-Object Text.UTF8Encoding($true)))
+        Write-Host ''
+        Write-Host ('已写出状态 JSON：' + $full)
+        Write-Host ('  {0} B ｜ 读法：Get-Content -Raw 后 ConvertFrom-Json  或  python json.load(open(p, encoding=''utf-8-sig''))' -f (Get-Item -LiteralPath $full).Length)
+        return
+    }
+    try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
+    Write-Output $json
+}
+
+function Show-AgentGuide {
+    param([string]$Path)
+    $text = @'
+# memfuse · 交给 Agent 的接口说明
+
+> 本说明由 `memfuse.cmd -AgentGuide` 生成。用法：把**全文**发给任意 AI Agent，
+> 它即可按下面的契约读取本机内存守护的状态、并（在你明确要求时）调用它的能力。
+
+## 一、读（只读，随时可跑）
+
+1. **状态 JSON**（推荐主入口）：
+
+   `powershell -NoProfile -ExecutionPolicy Bypass -File "__SCRIPT__" -Json -OutFile "<路径>.json"`
+
+   - schema `memfuse.status` v1；落盘为 **UTF-8 带 BOM**
+     （PowerShell 用 `Get-Content -Raw`，Python 用 `encoding='utf-8-sig'`）
+   - 字段：`memory`（`freeMB` / `freePercent` / `commitPercent`）· `tier`
+     （`healthy` / `warn` / `critical`）· `thresholds`（各档阈值与开关）·
+     `candidates[]`（**当前会动手的候选**，已排除白名单与"你正在看的应用"）·
+     `demoted[]`（被降级还没还原的进程）· `protected`（内置 + 名单条目）·
+     `todayLog.tail`（今天的日志尾部，`-LogTail` 控制行数）
+2. **保护名单**：`-ListProtected`（含内置系统进程）｜ 名单文件本身：`-ShowProtectFile`
+3. **谁有窗口**（可能有未保存工作）：`-ListWindowed`
+4. **某进程占多少内存**：`-ShowProcMem chatgpt`（大小写无所谓；支持 `chat*`、多个用逗号）
+5. **今天的日志尾部**：`-ShowLog -LogTail 80`
+
+## 二、做（都是显式动作，各有安全语义）
+
+- **加白名单**：`-AddProtect node,code,"Tabbit Browser"`
+  （幂等 / 去重 / 保留文件里的注释 / 先写 `protect-list.txt.bak`）
+- **去白名单**：`-RemoveProtect <名字>`
+- **手动强杀**：`-KillProc -KillProcInput "1;y"`
+  （先列出可杀项；`y` 是确认，漏写 = 不杀；系统与白名单进程不在列表里）
+- **预演**：`-DryRun -Once`（什么都不做，只告诉你会杀谁）
+
+> 落盘写法（管道/重定向下**必须**用，否则中文按控制台编码写出去会乱）：
+> `-Json -OutFile <路径>.json`、`-AgentGuide -OutFile <路径>.md` —— 都是 UTF-8 带 BOM。
+
+## 三、这条链路的语义（别误解）
+
+- 守护的击杀是**自动**的，且候选已经过三重排除：白名单、前台应用**同名全家**
+  （浏览器把窗口交给主进程、你读的那一页在同名子进程里）、小于 `MinCandidateMB` 的进程；
+- 警告线（默认 12%）以下**先降级**（降优先级 + 回收工作集，可还原）；临界线
+  （默认 7% 连续 3 次采样）才击杀；一次只动一个，每小时有刹车（紧急档放宽）；
+- `memory.freePercent` 是"可用物理内存"，不是"已用"；`tier` 就是它落在哪一档。
+
+## 四、典型问法 → 读什么
+
+1. 「刚才为什么卡了一下 / 为什么杀了 X」→ `todayLog.tail` + `demoted`，对照 `memory` 说清档位
+2. 「别让它杀我的编译器」→ `-ShowProcMem` 确认进程名 → `-AddProtect` → 再 `-Json` 验证 `protected.fileEntries`
+3. 「现在最该让路的是谁」→ `candidates[0]`（体积降序，已排除你正在看的东西）
+
+## 五、与 ExeTrace 联动
+
+装了 ExeTrace（原生版 ≥ v1.1.0）时，可在它的应用列表里右键「加入 memfuse 白名单」；
+CLI 等价写法：`ExeTrace.exe --whitelist "<进程名或 exe 路径>"` —— 那条路调的就是本脚本的
+`-AddProtect`（同一套幂等写入，不存在第二份名单逻辑）。
+
+## 六、边界
+
+- 只读接口不做任何动作；写操作只发生在**你显式调用**时；
+- 中文输出：管道/重定向场景请用 `-Json -OutFile`，不要依赖 stdout 的编码；
+- 本说明不含本机路径以外的信息；`paths` 字段里的路径由 JSON 提供。
+'@
+    $note = $text.Replace('__SCRIPT__', $PSCommandPath)
+    if ($Path) {
+        # Same reasoning as -Json -OutFile: a redirected pipe would encode the
+        # Chinese text with the console code page (GBK), which mangles it for the
+        # agent on the other side. A UTF-8 BOM file is what both sides read right.
+        $full = [IO.Path]::GetFullPath($Path)
+        $dir = Split-Path -Parent $full
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        [IO.File]::WriteAllText($full, $note, (New-Object Text.UTF8Encoding($true)))
+        Write-Host ''
+        Write-Host ('已写出接口说明：' + $full)
+        Write-Host ('  {0} B ｜ 读法：Get-Content -Raw ／ 直接作为文件附给 Agent' -f (Get-Item -LiteralPath $full).Length)
+        return
+    }
+    try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
+    Write-Output $note
+}
+
+
+if ($Json) { Show-StatusJson -Path $OutFile; exit 0 }
+if ($AgentGuide) { Show-AgentGuide -Path $OutFile; exit 0 }
 if ($Menu) { Show-Menu -Scripted $MenuInput; exit 0 }
 if ($Tray) { Show-Tray; exit 0 }
 if ($UninstallTask) { Uninstall-GuardTask; exit 0 }
